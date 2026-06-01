@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: pgworkflows-postgres
+    environment:
+      POSTGRES_DB: pgworkflows
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d pgworkflows"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - pgworkflows-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  pgworkflows-postgres-data:
