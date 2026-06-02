@@ -198,39 +198,47 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         );
     }
 
-    public async ValueTask RecordSuccessAsync(
+    public ValueTask<bool> RenewLeaseAsync(
+        Guid jobId,
+        string leaseToken,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    ) =>
+        ExecuteLeaseGuardedUpdateAsync(
+            "lease_expires_at = @lease_expires_at",
+            parameters => parameters.AddWithValue("lease_expires_at", leaseExpiresAt),
+            jobId,
+            leaseToken,
+            cancellationToken
+        );
+
+    public ValueTask<bool> RecordSuccessAsync(
         Guid jobId,
         string leaseToken,
         string? result,
         CancellationToken cancellationToken = default
-    )
-    {
-        const string sql = """
-            update pw_activity_jobs
-            set status = @status,
+    ) =>
+        ExecuteLeaseGuardedUpdateAsync(
+            """
+            status = @status,
                 result = @result,
                 error = null,
                 lease_token = null,
                 lease_expires_at = null,
                 completed_at = @completed_at
-            where job_id = @job_id
-              and lease_token = @lease_token
-              and status = @leased_status;
-            """;
+            """,
+            parameters =>
+            {
+                parameters.AddWithValue("status", SucceededStatus);
+                parameters.AddWithValue("result", (object?)result ?? DBNull.Value);
+                parameters.AddWithValue("completed_at", DateTimeOffset.UtcNow);
+            },
+            jobId,
+            leaseToken,
+            cancellationToken
+        );
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("status", SucceededStatus);
-        command.Parameters.AddWithValue("result", (object?)result ?? DBNull.Value);
-        command.Parameters.AddWithValue("completed_at", DateTimeOffset.UtcNow);
-        command.Parameters.AddWithValue("job_id", jobId);
-        command.Parameters.AddWithValue("lease_token", leaseToken);
-        command.Parameters.AddWithValue("leased_status", LeasedStatus);
-
-        await EnsureUpdatedAsync(command, jobId, leaseToken, cancellationToken);
-    }
-
-    public async ValueTask RecordFailureAsync(
+    public ValueTask<bool> RecordFailureAsync(
         Guid jobId,
         string leaseToken,
         string error,
@@ -243,14 +251,51 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
 
         var status = retryable ? PendingStatus : FailedStatus;
 
-        const string sql = """
-            update pw_activity_jobs
-            set status = @status,
+        return ExecuteLeaseGuardedUpdateAsync(
+            """
+            status = @status,
                 visible_at = @visible_at,
                 error = @error,
                 lease_token = null,
                 lease_expires_at = null,
                 completed_at = @completed_at
+            """,
+            parameters =>
+            {
+                parameters.AddWithValue("status", status);
+                parameters.AddWithValue(
+                    "visible_at",
+                    retryable ? nextVisibleAt ?? DateTimeOffset.UtcNow : DateTimeOffset.UtcNow
+                );
+                parameters.AddWithValue("error", error);
+                parameters.AddWithValue(
+                    "completed_at",
+                    retryable ? DBNull.Value : DateTimeOffset.UtcNow
+                );
+            },
+            jobId,
+            leaseToken,
+            cancellationToken
+        );
+    }
+
+    /// <summary>
+    /// Runs an UPDATE guarded by the lease invariant — only the current lease holder, while
+    /// the job is still leased, may mutate it. Returns <c>false</c> when no row matched (the
+    /// lease was lost). The single source of truth for that guard; <paramref name="setClause"/>
+    /// is always a compile-time constant, never caller input.
+    /// </summary>
+    private async ValueTask<bool> ExecuteLeaseGuardedUpdateAsync(
+        string setClause,
+        Action<NpgsqlParameterCollection> bindSetParameters,
+        Guid jobId,
+        string leaseToken,
+        CancellationToken cancellationToken
+    )
+    {
+        var sql = $"""
+            update pw_activity_jobs
+            set {setClause}
             where job_id = @job_id
               and lease_token = @lease_token
               and status = @leased_status;
@@ -258,37 +303,12 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("status", status);
-        command.Parameters.AddWithValue(
-            "visible_at",
-            retryable ? nextVisibleAt ?? DateTimeOffset.UtcNow : DateTimeOffset.UtcNow
-        );
-        command.Parameters.AddWithValue("error", error);
-        command.Parameters.AddWithValue(
-            "completed_at",
-            retryable ? DBNull.Value : DateTimeOffset.UtcNow
-        );
+        bindSetParameters(command.Parameters);
         command.Parameters.AddWithValue("job_id", jobId);
         command.Parameters.AddWithValue("lease_token", leaseToken);
         command.Parameters.AddWithValue("leased_status", LeasedStatus);
 
-        await EnsureUpdatedAsync(command, jobId, leaseToken, cancellationToken);
-    }
-
-    private static async ValueTask EnsureUpdatedAsync(
-        NpgsqlCommand command,
-        Guid jobId,
-        string leaseToken,
-        CancellationToken cancellationToken
-    )
-    {
-        var rowsAffected = await command.ExecuteNonQueryAsync(cancellationToken);
-        if (rowsAffected == 0)
-        {
-            throw new InvalidOperationException(
-                $"The lease for job '{jobId}' with token '{leaseToken}' is no longer valid."
-            );
-        }
+        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     private static string? ReadNullableString(NpgsqlDataReader reader, int ordinal) =>

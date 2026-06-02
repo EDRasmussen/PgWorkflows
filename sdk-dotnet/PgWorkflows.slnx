@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="PgWorkflows.ConsoleSample/PgWorkflows.ConsoleSample.csproj" />
+  <Project Path="PgWorkflows.Tests/PgWorkflows.Tests.csproj" />
+  <Project Path="PgWorkflows/PgWorkflows.csproj" />
+</Solution>

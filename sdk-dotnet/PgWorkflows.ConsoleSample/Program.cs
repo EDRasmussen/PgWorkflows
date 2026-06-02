@@ -19,7 +19,7 @@ await store.EnsureSchemaAsync();
 var registry = new ActivityRegistry();
 registry.Register(
     "hello",
-    static (context, input, cancellationToken) =>
+    static (context, input, _) =>
     {
         var name = string.IsNullOrWhiteSpace(input) ? "world" : input;
         return ValueTask.FromResult<string?>(
