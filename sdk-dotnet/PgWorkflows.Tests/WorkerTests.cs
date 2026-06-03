@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using PgWorkflows;
 using PgWorkflows.Activities;
 using PgWorkflows.Jobs;
 using PgWorkflows.Persistence;
@@ -37,9 +40,13 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         var registry = new ActivityRegistry();
         registry.Register("typed-greet", static (GreetingInput input) => new GreetingOutput($"hello {input.Name}"));
-        registry.Register<UppercaseActivity>();
+        registry.RegisterActivity<GreetingActivities, GreetingInput, GreetingOutput>(
+            "uppercase",
+            new GreetingActivities(),
+            static activities => activities.Uppercase
+        );
         var greetingId = await Store.EnqueueAsync("typed-greet", new GreetingInput("world"));
-        var uppercaseId = await Store.EnqueueAsync(ActivityName.For<UppercaseActivity>(), new GreetingInput("world"));
+        var uppercaseId = await Store.EnqueueAsync("uppercase", new GreetingInput("world"));
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var firstBatch = await worker.RunOnceAsync();
@@ -54,6 +61,46 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         Assert.Equal(JobStatus.Succeeded, uppercase!.Status);
         Assert.Equal(new GreetingOutput("hello world"), greeting.GetResult<GreetingOutput>());
         Assert.Equal(new GreetingOutput("WORLD"), uppercase.GetResult<GreetingOutput>());
+    }
+
+    [Fact]
+    public async Task Hosted_worker_registered_with_AddPgWorkflows_processes_activity()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IActivityJobStore>(Store);
+        services.AddSingleton(new GreetingPrefix("hello"));
+        services.AddPgWorkflows(pg =>
+            pg.ConfigureWorker(options =>
+                    options with
+                    {
+                        WorkerId = "hosted-worker",
+                        BatchSize = 1,
+                        PollInterval = TimeSpan.FromMilliseconds(50),
+                    }
+                )
+                .AddActivities<HostedGreetingActivities>()
+        );
+
+        await using var provider = services.BuildServiceProvider();
+        var hostedService = Assert.Single(provider.GetServices<IHostedService>());
+        await hostedService.StartAsync(CancellationToken.None);
+
+        try
+        {
+            var greetId = await Store.EnqueueAsync("hosted-greet", "world");
+            var repeatId = await Store.EnqueueAsync("hosted-repeat", 2);
+            var greet = await WaitForTerminalAsync(greetId, TimeSpan.FromSeconds(10));
+            var repeat = await WaitForTerminalAsync(repeatId, TimeSpan.FromSeconds(10));
+
+            Assert.Equal(JobStatus.Succeeded, greet.Status);
+            Assert.Equal(JobStatus.Succeeded, repeat.Status);
+            Assert.Equal("hello world", greet.GetResult<string>());
+            Assert.Equal("hello hello", repeat.GetResult<string>());
+        }
+        finally
+        {
+            await hostedService.StopAsync(CancellationToken.None);
+        }
     }
 
     [Fact]
@@ -404,11 +451,21 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
     private sealed record GreetingOutput(string Message);
 
-    private sealed class UppercaseActivity : IActivity<GreetingInput, GreetingOutput>
+    private sealed class GreetingActivities
     {
-        public ValueTask<GreetingOutput> RunAsync(
-            GreetingInput input,
-            CancellationToken cancellationToken
-        ) => ValueTask.FromResult(new GreetingOutput(input.Name.ToUpperInvariant()));
+        public GreetingOutput Uppercase(GreetingInput input) =>
+            new(input.Name.ToUpperInvariant());
+    }
+
+    private sealed record GreetingPrefix(string Value);
+
+    private sealed class HostedGreetingActivities(GreetingPrefix prefix)
+    {
+        [Activity("hosted-greet")]
+        public string Greet(string input) => $"{prefix.Value} {input}";
+
+        [Activity("hosted-repeat")]
+        public ValueTask<string> Repeat(int count, CancellationToken _) =>
+            ValueTask.FromResult(string.Join(' ', Enumerable.Repeat(prefix.Value, count)));
     }
 }

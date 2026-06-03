@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Reflection;
-using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 
@@ -115,71 +113,99 @@ public sealed class ActivityRegistry
         );
     }
 
-    public void Register<TActivity>(
-        string? activityName = null,
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        TActivities activities,
+        Func<TActivities, Func<TInput, TOutput>> activityMethod,
+        JsonSerializerOptions? jsonSerializerOptions = null
+    ) =>
+        RegisterActivity(
+            activityName,
+            () => activities,
+            activityMethod,
+            jsonSerializerOptions
+        );
+
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        Func<TActivities> activityFactory,
+        Func<TActivities, Func<TInput, TOutput>> activityMethod,
         JsonSerializerOptions? jsonSerializerOptions = null
     )
-        where TActivity : IActivity, new()
     {
-        var activityType = typeof(TActivity);
-        var contract = GetActivityContract(activityType);
-        var registerMethod = GetType()
-            .GetMethod(nameof(RegisterActivityType), BindingFlags.Instance | BindingFlags.NonPublic)!
-            .MakeGenericMethod(activityType, contract.InputType, contract.OutputType);
+        ArgumentNullException.ThrowIfNull(activityFactory);
+        ArgumentNullException.ThrowIfNull(activityMethod);
 
-        try
-        {
-            registerMethod.Invoke(
-                this,
-                [
-                    activityName ?? ActivityName.For(activityType),
-                    new Func<TActivity>(() => new TActivity()),
-                    jsonSerializerOptions,
-                ]
-            );
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is not null)
-        {
-            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-        }
+        Register<TInput, TOutput>(
+            activityName,
+            input => activityMethod(activityFactory())(input),
+            jsonSerializerOptions
+        );
+    }
+
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        TActivities activities,
+        Func<TActivities, Func<TInput, ValueTask<TOutput>>> activityMethod,
+        JsonSerializerOptions? jsonSerializerOptions = null
+    ) =>
+        RegisterActivity(
+            activityName,
+            () => activities,
+            activityMethod,
+            jsonSerializerOptions
+        );
+
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        Func<TActivities> activityFactory,
+        Func<TActivities, Func<TInput, ValueTask<TOutput>>> activityMethod,
+        JsonSerializerOptions? jsonSerializerOptions = null
+    )
+    {
+        ArgumentNullException.ThrowIfNull(activityFactory);
+        ArgumentNullException.ThrowIfNull(activityMethod);
+
+        Register<TInput, TOutput>(
+            activityName,
+            input => activityMethod(activityFactory())(input),
+            jsonSerializerOptions
+        );
+    }
+
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        TActivities activities,
+        Func<TActivities, Func<TInput, CancellationToken, ValueTask<TOutput>>> activityMethod,
+        JsonSerializerOptions? jsonSerializerOptions = null
+    ) =>
+        RegisterActivity(
+            activityName,
+            () => activities,
+            activityMethod,
+            jsonSerializerOptions
+        );
+
+    public void RegisterActivity<TActivities, TInput, TOutput>(
+        string activityName,
+        Func<TActivities> activityFactory,
+        Func<TActivities, Func<TInput, CancellationToken, ValueTask<TOutput>>> activityMethod,
+        JsonSerializerOptions? jsonSerializerOptions = null
+    )
+    {
+        ArgumentNullException.ThrowIfNull(activityFactory);
+        ArgumentNullException.ThrowIfNull(activityMethod);
+
+        Register<TInput, TOutput>(
+            activityName,
+            (input, cancellationToken) => activityMethod(activityFactory())(input, cancellationToken),
+            jsonSerializerOptions
+        );
     }
 
     public bool TryResolve(string activityName, out ActivityHandler? handler)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(activityName);
         return _handlers.TryGetValue(activityName, out handler);
-    }
-
-    private void RegisterActivityType<TActivity, TInput, TOutput>(
-        string activityName,
-        Func<TActivity> activityFactory,
-        JsonSerializerOptions? jsonSerializerOptions
-    )
-        where TActivity : IActivity<TInput, TOutput>
-    {
-        Register<TInput, TOutput>(
-            activityName,
-            (_, input, cancellationToken) => activityFactory().RunAsync(input!, cancellationToken),
-            jsonSerializerOptions
-        );
-    }
-
-    private static (Type InputType, Type OutputType) GetActivityContract(Type activityType)
-    {
-        var contracts = activityType
-            .GetInterfaces()
-            .Where(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IActivity<,>))
-            .ToArray();
-
-        return contracts.Length switch
-        {
-            1 => (contracts[0].GetGenericArguments()[0], contracts[0].GetGenericArguments()[1]),
-            0 => throw new InvalidOperationException(
-                $"Activity type '{activityType.FullName}' must implement IActivity<TInput, TOutput>."
-            ),
-            _ => throw new InvalidOperationException(
-                $"Activity type '{activityType.FullName}' must implement exactly one IActivity<TInput, TOutput>."
-            ),
-        };
     }
 }
