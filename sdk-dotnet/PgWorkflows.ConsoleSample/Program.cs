@@ -1,6 +1,7 @@
 using Npgsql;
 using PgWorkflows.Activities;
 using PgWorkflows.Jobs;
+using PgWorkflows.Persistence;
 using PgWorkflows.Persistence.Postgres;
 using PgWorkflows.Workers;
 
@@ -19,18 +20,10 @@ await store.EnsureSchemaAsync();
 var registry = new ActivityRegistry();
 registry.Register(
     "hello",
-    static (context, input, _) =>
-    {
-        var name = string.IsNullOrWhiteSpace(input) ? "world" : input;
-        return ValueTask.FromResult<string?>(
-            $"Hello, {name}. Job {context.JobId} ran on attempt {context.Attempt}."
-        );
-    }
+    static (string name) => $"Hello, {(string.IsNullOrWhiteSpace(name) ? "world" : name)}."
 );
 
-var jobId = await store.EnqueueAsync(
-    new EnqueueActivityRequest(ActivityName: "hello", Input: "Postgres")
-);
+var jobId = await store.EnqueueAsync("hello", "Postgres");
 
 var worker = new ActivityWorker(
     registry,
@@ -46,4 +39,4 @@ var job =
 Console.WriteLine($"Processed jobs: {processed}");
 Console.WriteLine($"Job id: {job.JobId}");
 Console.WriteLine($"Status: {job.Status}");
-Console.WriteLine($"Result: {job.Result ?? "<null>"}");
+Console.WriteLine($"Result: {job.GetResult<string>() ?? "<null>"}");

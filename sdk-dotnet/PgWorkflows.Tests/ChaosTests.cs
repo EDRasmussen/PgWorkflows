@@ -1,5 +1,5 @@
 using PgWorkflows.Activities;
-using PgWorkflows.Jobs;
+using PgWorkflows.Persistence;
 using PgWorkflows.Workers;
 using Xunit;
 
@@ -20,7 +20,7 @@ public sealed class ChaosTests(PostgresFixture fixture) : PostgresTestBase(fixtu
         const int jobCount = 60;
 
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<object?, string>(
             "work",
             async (_, _, ct) =>
             {
@@ -33,7 +33,7 @@ public sealed class ChaosTests(PostgresFixture fixture) : PostgresTestBase(fixtu
 
         for (var i = 0; i < jobCount; i++)
         {
-            await Store.EnqueueAsync(new EnqueueActivityRequest("work", null, MaxAttempts: 100));
+            await Store.EnqueueAsync("work", (object?)null, maxAttempts: 100);
         }
 
         var options = new ActivityWorkerOptions

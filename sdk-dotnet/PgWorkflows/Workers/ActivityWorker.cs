@@ -139,16 +139,15 @@ public sealed class ActivityWorker(
     {
         if (!_registry.TryResolve(leasedJob.ActivityName, out var handler) || handler is null)
         {
-            return await TryRecordAsync(
-                () =>
-                    _store.RecordFailureAsync(
-                        leasedJob.JobId,
-                        leasedJob.LeaseToken,
-                        $"No activity handler was registered for '{leasedJob.ActivityName}'.",
-                        retryable: false,
-                        nextVisibleAt: null,
-                        cancellationToken
-                    )
+            return await TryRecordAsync(() =>
+                _store.RecordFailureAsync(
+                    leasedJob.JobId,
+                    leasedJob.LeaseToken,
+                    $"No activity handler was registered for '{leasedJob.ActivityName}'.",
+                    retryable: false,
+                    nextVisibleAt: null,
+                    cancellationToken
+                )
             );
         }
 
@@ -177,11 +176,11 @@ public sealed class ActivityWorker(
             leasedJob.CreatedAt
         );
 
-        string? result = null;
+        string? resultJson = null;
         Exception? handlerError = null;
         try
         {
-            result = await handler(context, leasedJob.Input, jobCts.Token);
+            resultJson = await handler(context, leasedJob.InputJson, jobCts.Token);
         }
         catch (Exception ex)
         {
@@ -219,14 +218,8 @@ public sealed class ActivityWorker(
 
         if (handlerError is null)
         {
-            return await TryRecordAsync(
-                () =>
-                    _store.RecordSuccessAsync(
-                        leasedJob.JobId,
-                        leasedJob.LeaseToken,
-                        result,
-                        writeToken
-                    )
+            return await TryRecordAsync(() =>
+                _store.RecordSuccessAsync(leasedJob.JobId, leasedJob.LeaseToken, resultJson, writeToken)
             );
         }
 
@@ -235,16 +228,15 @@ public sealed class ActivityWorker(
             ? DateTimeOffset.UtcNow + _options.GetRetryDelay(leasedJob.Attempt)
             : null;
 
-        return await TryRecordAsync(
-            () =>
-                _store.RecordFailureAsync(
-                    leasedJob.JobId,
-                    leasedJob.LeaseToken,
-                    handlerError.ToString(),
-                    retryable,
-                    nextVisibleAt,
-                    writeToken
-                )
+        return await TryRecordAsync(() =>
+            _store.RecordFailureAsync(
+                leasedJob.JobId,
+                leasedJob.LeaseToken,
+                handlerError.ToString(),
+                retryable,
+                nextVisibleAt,
+                writeToken
+            )
         );
     }
 
@@ -288,12 +280,14 @@ public sealed class ActivityWorker(
             try
             {
                 var newExpiresAt = DateTimeOffset.UtcNow + _options.LeaseDuration;
-                if (await _store.RenewLeaseAsync(
-                    leasedJob.JobId,
-                    leasedJob.LeaseToken,
-                    newExpiresAt,
-                    stopToken
-                ))
+                if (
+                    await _store.RenewLeaseAsync(
+                        leasedJob.JobId,
+                        leasedJob.LeaseToken,
+                        newExpiresAt,
+                        stopToken
+                    )
+                )
                 {
                     leaseExpiresAt = newExpiresAt;
                 }

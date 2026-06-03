@@ -5,7 +5,7 @@ namespace PgWorkflows.Persistence;
 public sealed record LeasedActivityJob(
     Guid JobId,
     string ActivityName,
-    string? Input,
+    string? InputJson,
     int Attempt,
     int MaxAttempts,
     DateTimeOffset CreatedAt,
@@ -15,11 +15,11 @@ public sealed record LeasedActivityJob(
     : ActivityJob(
         JobId,
         ActivityName,
-        Input,
+        InputJson,
         JobStatus.Leased,
         Attempt,
         MaxAttempts,
         CreatedAt,
         VisibleAt,
-        Result: null,
+        ResultJson: null,
         Error: null);

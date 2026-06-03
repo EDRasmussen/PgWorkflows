@@ -29,14 +29,14 @@ public interface IActivityJobStore
     );
 
     /// <summary>
-    /// Records a successful result. Returns <c>false</c> when the lease is no longer
+    /// Records a successful JSON result. Returns <c>false</c> when the lease is no longer
     /// held (another worker reclaimed the job), in which case nothing was written and
     /// the caller should abandon.
     /// </summary>
     ValueTask<bool> RecordSuccessAsync(
         Guid jobId,
         string leaseToken,
-        string? result,
+        string? resultJson,
         CancellationToken cancellationToken = default
     );
 

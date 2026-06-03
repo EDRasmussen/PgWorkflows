@@ -18,11 +18,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     public async Task Worker_runs_activity_and_persists_result()
     {
         var registry = new ActivityRegistry();
-        registry.Register(
-            "greet",
-            static (_, input, _) => ValueTask.FromResult<string?>($"hello {input}")
-        );
-        var jobId = await Store.EnqueueAsync(new EnqueueActivityRequest("greet", "world"));
+        registry.Register("greet", static (string input) => $"hello {input}");
+        var jobId = await Store.EnqueueAsync("greet", "world");
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var processed = await worker.RunOnceAsync();
@@ -31,8 +28,32 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var job = await Store.GetAsync(jobId);
         Assert.NotNull(job);
         Assert.Equal(JobStatus.Succeeded, job!.Status);
-        Assert.Equal("hello world", job.Result);
+        Assert.Equal("hello world", job.GetResult<string>());
         Assert.Equal(1, job.Attempt);
+    }
+
+    [Fact]
+    public async Task Worker_runs_typed_activity_and_persists_typed_result()
+    {
+        var registry = new ActivityRegistry();
+        registry.Register("typed-greet", static (GreetingInput input) => new GreetingOutput($"hello {input.Name}"));
+        registry.Register<UppercaseActivity>();
+        var greetingId = await Store.EnqueueAsync("typed-greet", new GreetingInput("world"));
+        var uppercaseId = await Store.EnqueueAsync(ActivityName.For<UppercaseActivity>(), new GreetingInput("world"));
+        var worker = new ActivityWorker(registry, Store, Options("w1"));
+
+        var firstBatch = await worker.RunOnceAsync();
+        var secondBatch = await worker.RunOnceAsync();
+
+        Assert.Equal(2, firstBatch + secondBatch);
+        var greeting = await Store.GetAsync(greetingId);
+        var uppercase = await Store.GetAsync(uppercaseId);
+        Assert.NotNull(greeting);
+        Assert.NotNull(uppercase);
+        Assert.Equal(JobStatus.Succeeded, greeting!.Status);
+        Assert.Equal(JobStatus.Succeeded, uppercase!.Status);
+        Assert.Equal(new GreetingOutput("hello world"), greeting.GetResult<GreetingOutput>());
+        Assert.Equal(new GreetingOutput("WORLD"), uppercase.GetResult<GreetingOutput>());
     }
 
     [Fact]
@@ -40,7 +61,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         var executions = 0;
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<object?, string>(
             "boom",
             (_, _, _) =>
             {
@@ -48,9 +69,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 throw new InvalidOperationException("boom");
             }
         );
-        var jobId = await Store.EnqueueAsync(
-            new EnqueueActivityRequest("boom", null, MaxAttempts: 3)
-        );
+        var jobId = await Store.EnqueueAsync("boom", (object?)null, maxAttempts: 3);
         var worker = new ActivityWorker(
             registry,
             Store,
@@ -77,7 +96,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // (longer than LeaseDuration) is never stolen and re-run by another worker.
         var executions = 0;
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<object?, string>(
             "slow",
             async (_, _, ct) =>
             {
@@ -86,9 +105,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return "done";
             }
         );
-        var jobId = await Store.EnqueueAsync(
-            new EnqueueActivityRequest("slow", null, MaxAttempts: 5)
-        );
+        var jobId = await Store.EnqueueAsync("slow", (object?)null, maxAttempts: 5);
 
         var lease = TimeSpan.FromSeconds(1);
         var workerA = new ActivityWorker(registry, Store, Options("A") with { LeaseDuration = lease });
@@ -105,7 +122,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         Assert.Equal(0, await runB); // B found nothing to lease
         var job = await Store.GetAsync(jobId);
         Assert.Equal(JobStatus.Succeeded, job!.Status);
-        Assert.Equal("done", job.Result);
+        Assert.Equal("done", job.GetResult<string>());
         Assert.Equal(1, job.Attempt); // attempt not inflated by a re-lease
     }
 
@@ -117,7 +134,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // worker reclaims and completes the job.
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<object?, string>(
             "stalls-then-recovers",
             async (ctx, _, ct) =>
             {
@@ -130,9 +147,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return "recovered";
             }
         );
-        var jobId = await Store.EnqueueAsync(
-            new EnqueueActivityRequest("stalls-then-recovers", null, MaxAttempts: 5)
-        );
+        var jobId = await Store.EnqueueAsync("stalls-then-recovers", (object?)null, maxAttempts: 5);
 
         var lease = TimeSpan.FromSeconds(1);
         var deadWorker = new ActivityWorker(registry, Store, Options("dead") with { LeaseDuration = lease });
@@ -149,7 +164,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var job = await RunUntilTerminalAsync(liveWorker, jobId, TimeSpan.FromSeconds(10));
 
         Assert.Equal(JobStatus.Succeeded, job.Status);
-        Assert.Equal("recovered", job.Result);
+        Assert.Equal("recovered", job.GetResult<string>());
         Assert.True(job.Attempt >= 2, $"expected a re-lease, got attempt {job.Attempt}");
     }
 
@@ -178,12 +193,12 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         Assert.Equal(jobId, Assert.Single(fresh).JobId);
         Assert.NotEqual(stale[0].LeaseToken, fresh[0].LeaseToken);
 
-        Assert.False(await Store.RecordSuccessAsync(jobId, stale[0].LeaseToken, "stale"));
-        Assert.True(await Store.RecordSuccessAsync(jobId, fresh[0].LeaseToken, "fresh"));
+        Assert.False(await Store.RecordSuccessAsync(jobId, stale[0].LeaseToken, "\"stale\""));
+        Assert.True(await Store.RecordSuccessAsync(jobId, fresh[0].LeaseToken, "\"fresh\""));
 
         var job = await Store.GetAsync(jobId);
         Assert.Equal(JobStatus.Succeeded, job!.Status);
-        Assert.Equal("fresh", job.Result);
+        Assert.Equal("fresh", job.GetResult<string>());
     }
 
     [Fact]
@@ -197,7 +212,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var firstLeased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var executions = new ConcurrentDictionary<Guid, int>();
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<string, string>(
             "slow",
             async (ctx, _, ct) =>
             {
@@ -211,7 +226,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var ids = new List<Guid>();
         for (var i = 0; i < 3; i++)
         {
-            ids.Add(await Store.EnqueueAsync(new EnqueueActivityRequest("slow", i.ToString(), MaxAttempts: 5)));
+            ids.Add(await Store.EnqueueAsync("slow", i.ToString(), maxAttempts: 5));
         }
 
         var lease = TimeSpan.FromMilliseconds(400);
@@ -255,7 +270,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         const int jobCount = 4;
         var executions = new ConcurrentDictionary<Guid, int>();
         var registry = new ActivityRegistry();
-        registry.Register(
+        registry.Register<string, string>(
             "ok",
             async (ctx, _, ct) =>
             {
@@ -268,7 +283,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var ids = new List<Guid>();
         for (var i = 0; i < jobCount; i++)
         {
-            ids.Add(await Store.EnqueueAsync(new EnqueueActivityRequest("ok", i.ToString(), MaxAttempts: 5)));
+            ids.Add(await Store.EnqueueAsync("ok", i.ToString(), maxAttempts: 5));
         }
 
         // Fails exactly the first commit; every other write records normally.
@@ -341,14 +356,14 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default) =>
             inner.RenewLeaseAsync(id, token, exp, ct);
 
-        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? result, CancellationToken ct = default)
+        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default)
         {
             if (Interlocked.Increment(ref _successAttempts) == 1)
             {
                 throw new InvalidOperationException("simulated transient store error");
             }
 
-            return inner.RecordSuccessAsync(id, token, result, ct);
+            return inner.RecordSuccessAsync(id, token, resultJson, ct);
         }
 
         public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
@@ -383,5 +398,17 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         }
 
         throw new TimeoutException($"Job {jobId} did not reach a terminal state in {timeout}.");
+    }
+
+    private sealed record GreetingInput(string Name);
+
+    private sealed record GreetingOutput(string Message);
+
+    private sealed class UppercaseActivity : IActivity<GreetingInput, GreetingOutput>
+    {
+        public ValueTask<GreetingOutput> RunAsync(
+            GreetingInput input,
+            CancellationToken cancellationToken
+        ) => ValueTask.FromResult(new GreetingOutput(input.Name.ToUpperInvariant()));
     }
 }

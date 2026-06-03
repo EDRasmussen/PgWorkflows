@@ -1,4 +1,5 @@
 using Npgsql;
+using NpgsqlTypes;
 using PgWorkflows.Jobs;
 
 namespace PgWorkflows.Persistence.Postgres;
@@ -66,7 +67,11 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("job_id", jobId);
         command.Parameters.AddWithValue("activity_name", request.ActivityName);
-        command.Parameters.AddWithValue("input", (object?)request.Input ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "input",
+            NpgsqlDbType.Jsonb,
+            (object?)request.InputJson ?? DBNull.Value
+        );
         command.Parameters.AddWithValue("status", PendingStatus);
         command.Parameters.AddWithValue("attempt", 0);
         command.Parameters.AddWithValue("max_attempts", Math.Max(request.MaxAttempts, 1));
@@ -215,7 +220,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
     public ValueTask<bool> RecordSuccessAsync(
         Guid jobId,
         string leaseToken,
-        string? result,
+        string? resultJson,
         CancellationToken cancellationToken = default
     ) =>
         ExecuteLeaseGuardedUpdateAsync(
@@ -230,7 +235,11 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             parameters =>
             {
                 parameters.AddWithValue("status", SucceededStatus);
-                parameters.AddWithValue("result", (object?)result ?? DBNull.Value);
+                parameters.AddWithValue(
+                    "result",
+                    NpgsqlDbType.Jsonb,
+                    (object?)resultJson ?? DBNull.Value
+                );
                 parameters.AddWithValue("completed_at", DateTimeOffset.UtcNow);
             },
             jobId,

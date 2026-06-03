@@ -6,7 +6,7 @@ public static class PostgresSchema
         create table if not exists pw_activity_jobs (
             job_id uuid primary key,
             activity_name text not null,
-            input text null,
+            input jsonb null,
             status text not null,
             attempt integer not null,
             max_attempts integer not null,
@@ -15,7 +15,7 @@ public static class PostgresSchema
             lease_token text null,
             lease_expires_at timestamptz null,
             completed_at timestamptz null,
-            result text null,
+            result jsonb null,
             error text null
         );
 
