@@ -188,28 +188,98 @@ public sealed class PgWorkflowsBuilder
         where TActivities : class
     {
         var activityType = typeof(TActivities);
-        var methods = activityType
+        var activities = activityType
             .GetMethods(BindingFlags.Instance | BindingFlags.Public)
             .Where(method => method.GetCustomAttribute<ActivityAttribute>() is not null)
+            .Select(CreateDiscoveredActivity)
             .ToArray();
 
-        if (methods.Length == 0)
+        if (activities.Length == 0)
         {
             throw new InvalidOperationException(
                 $"Activity type '{activityType.FullName}' has no public methods marked with [Activity]."
             );
         }
 
-        foreach (var method in methods)
+        var duplicate = activities
+            .GroupBy(activity => activity.Name, StringComparer.Ordinal)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
         {
-            var attribute = method.GetCustomAttribute<ActivityAttribute>()!;
-            var activityName = string.IsNullOrWhiteSpace(attribute.Name)
-                ? method.Name
-                : attribute.Name!;
+            throw new InvalidOperationException(
+                $"Activity type '{activityType.FullName}' defines multiple activities named '{duplicate.Key}'. Activity names must be unique."
+            );
+        }
 
+        foreach (var activity in activities)
+        {
+            if (_registry.TryResolve(activity.Name, out _))
+            {
+                throw new InvalidOperationException(
+                    $"An activity named '{activity.Name}' is already registered."
+                );
+            }
+        }
+
+        foreach (var activity in activities)
+        {
             _registry.Register(
-                activityName,
-                CreateHandler<TActivities>(provider, method, jsonSerializerOptions)
+                activity.Name,
+                CreateHandler<TActivities>(provider, activity.Method, jsonSerializerOptions)
+            );
+        }
+    }
+
+    private static DiscoveredActivity CreateDiscoveredActivity(MethodInfo method)
+    {
+        ValidateActivityMethod(method);
+
+        var attribute = method.GetCustomAttribute<ActivityAttribute>()!;
+        var name = string.IsNullOrWhiteSpace(attribute.Name) ? method.Name : attribute.Name!;
+        return new DiscoveredActivity(name, method);
+    }
+
+    private static void ValidateActivityMethod(MethodInfo method)
+    {
+        var displayName = $"{method.DeclaringType?.FullName}.{method.Name}";
+
+        if (method.IsGenericMethodDefinition)
+        {
+            throw new InvalidOperationException(
+                $"Activity method '{displayName}' must not be generic."
+            );
+        }
+
+        var parameters = method.GetParameters();
+        if (parameters.Any(parameter => parameter.ParameterType.IsByRef))
+        {
+            throw new InvalidOperationException(
+                $"Activity method '{displayName}' must not use ref, out, or in parameters."
+            );
+        }
+
+        var cancellationTokens = parameters
+            .Where(parameter => parameter.ParameterType == typeof(CancellationToken))
+            .ToArray();
+        if (cancellationTokens.Length > 1)
+        {
+            throw new InvalidOperationException(
+                $"Activity method '{displayName}' must accept at most one CancellationToken."
+            );
+        }
+
+        if (cancellationTokens.Length == 1 && parameters[^1].ParameterType != typeof(CancellationToken))
+        {
+            throw new InvalidOperationException(
+                $"Activity method '{displayName}' must put CancellationToken last."
+            );
+        }
+
+        var inputParameterCount = parameters.Length - cancellationTokens.Length;
+        if (inputParameterCount > 1)
+        {
+            throw new InvalidOperationException(
+                $"Activity method '{displayName}' must accept at most one input parameter before CancellationToken."
             );
         }
     }
@@ -221,30 +291,9 @@ public sealed class PgWorkflowsBuilder
     )
         where TActivities : class
     {
-        if (method.IsGenericMethodDefinition)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{method.DeclaringType?.FullName}.{method.Name}' must not be generic."
-            );
-        }
-
         var parameters = method.GetParameters();
-        if (parameters.Length > 2)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{method.DeclaringType?.FullName}.{method.Name}' must accept at most one input parameter and an optional CancellationToken."
-            );
-        }
-
         var hasCancellationToken = parameters.LastOrDefault()?.ParameterType == typeof(CancellationToken);
         var inputParameterCount = hasCancellationToken ? parameters.Length - 1 : parameters.Length;
-        if (inputParameterCount > 1)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{method.DeclaringType?.FullName}.{method.Name}' must accept at most one input parameter before CancellationToken."
-            );
-        }
-
         var inputType = inputParameterCount == 1 ? parameters[0].ParameterType : null;
 
         return async (_, inputJson, cancellationToken) =>
@@ -320,6 +369,8 @@ public sealed class PgWorkflowsBuilder
 
         return returned;
     }
+
+    private sealed record DiscoveredActivity(string Name, MethodInfo Method);
 
     private void AddPostgresStore(bool ensureSchemaOnStart)
     {
