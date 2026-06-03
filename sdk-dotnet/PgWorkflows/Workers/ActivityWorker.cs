@@ -1,4 +1,7 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using PgWorkflows;
 using PgWorkflows.Activities;
 using PgWorkflows.Persistence;
 
@@ -7,7 +10,8 @@ namespace PgWorkflows.Workers;
 public sealed class ActivityWorker(
     ActivityRegistry registry,
     IActivityJobStore store,
-    ActivityWorkerOptions? options = null
+    ActivityWorkerOptions? options = null,
+    ILogger<ActivityWorker>? logger = null
 )
 {
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
@@ -17,6 +21,7 @@ public sealed class ActivityWorker(
     private readonly IActivityJobStore _store =
         store ?? throw new ArgumentNullException(nameof(store));
     private readonly ActivityWorkerOptions _options = options ?? new ActivityWorkerOptions();
+    private readonly ILogger<ActivityWorker>? _logger = logger;
 
     public async ValueTask<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -41,6 +46,21 @@ public sealed class ActivityWorker(
         if (leasedJobs.Count == 0)
         {
             return 0;
+        }
+
+        _logger?.LogDebug(
+            "Worker {WorkerId} leased {JobCount} activity jobs.",
+            _options.WorkerId,
+            leasedJobs.Count
+        );
+        PgWorkflowsTelemetry.LeasedJobs.Add(leasedJobs.Count, WorkerTag);
+
+        foreach (var leasedJob in leasedJobs)
+        {
+            PgWorkflowsTelemetry.LeaseAge.Record(
+                Math.Max(0, (DateTimeOffset.UtcNow - leasedJob.CreatedAt).TotalMilliseconds),
+                ActivityTags(leasedJob)
+            );
         }
 
         // A job whose outcome couldn't be recorded (a real store error, distinct from the
@@ -82,6 +102,8 @@ public sealed class ActivityWorker(
     {
         var consecutiveFailures = 0;
 
+        _logger?.LogInformation("Activity worker {WorkerId} started.", _options.WorkerId);
+
         while (!cancellationToken.IsCancellationRequested)
         {
             try
@@ -96,6 +118,7 @@ public sealed class ActivityWorker(
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
                 return; // graceful shutdown
             }
             catch (Exception ex)
@@ -111,16 +134,27 @@ public sealed class ActivityWorker(
                 // the worker. Back off — growing with consecutive failures so a sustained
                 // outage isn't hammered — and try again. (Phase 1 adds structured logging.)
                 consecutiveFailures++;
+                var delay = BackoffDelay(consecutiveFailures);
+                _logger?.LogWarning(
+                    ex,
+                    "Activity worker {WorkerId} failed; backing off for {BackoffDelayMs}ms before retrying.",
+                    _options.WorkerId,
+                    delay.TotalMilliseconds
+                );
+                PgWorkflowsTelemetry.WorkerFailures.Add(1, WorkerTag);
                 try
                 {
-                    await Task.Delay(BackoffDelay(consecutiveFailures), cancellationToken);
+                    await Task.Delay(delay, cancellationToken);
                 }
                 catch (OperationCanceledException)
                 {
+                    _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
                     return;
                 }
             }
         }
+
+        _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
     }
 
     private TimeSpan BackoffDelay(int consecutiveFailures)
@@ -139,7 +173,12 @@ public sealed class ActivityWorker(
     {
         if (!_registry.TryResolve(leasedJob.ActivityName, out var handler) || handler is null)
         {
-            return await TryRecordAsync(() =>
+            _logger?.LogWarning(
+                "No activity handler was registered for {ActivityName}; failing job {JobId}.",
+                leasedJob.ActivityName,
+                leasedJob.JobId
+            );
+            var record = await TryRecordAsync(() =>
                 _store.RecordFailureAsync(
                     leasedJob.JobId,
                     leasedJob.LeaseToken,
@@ -149,6 +188,7 @@ public sealed class ActivityWorker(
                     cancellationToken
                 )
             );
+            return record.Error;
         }
 
         // One token ties the handler and its renewer together. Cancelling it both stops
@@ -178,6 +218,25 @@ public sealed class ActivityWorker(
 
         string? resultJson = null;
         Exception? handlerError = null;
+        var started = Stopwatch.GetTimestamp();
+        using var activity = PgWorkflowsTelemetry.ActivitySource.StartActivity(
+            "pgworkflows.activity.execute",
+            ActivityKind.Internal
+        );
+        activity?.SetTag("pgworkflows.worker.id", _options.WorkerId);
+        activity?.SetTag("pgworkflows.job.id", leasedJob.JobId);
+        activity?.SetTag("pgworkflows.activity.name", leasedJob.ActivityName);
+        activity?.SetTag("pgworkflows.activity.attempt", leasedJob.Attempt);
+        activity?.SetTag("pgworkflows.activity.max_attempts", leasedJob.MaxAttempts);
+
+        _logger?.LogDebug(
+            "Executing activity job {JobId} ({ActivityName}) attempt {Attempt}/{MaxAttempts}.",
+            leasedJob.JobId,
+            leasedJob.ActivityName,
+            leasedJob.Attempt,
+            leasedJob.MaxAttempts
+        );
+
         try
         {
             resultJson = await handler(context, leasedJob.InputJson, jobCts.Token);
@@ -196,6 +255,13 @@ public sealed class ActivityWorker(
         // nothing — recording here would clobber that worker.
         if (leaseLost)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
+            RecordExecutionMetrics(leasedJob, started, "lease_lost");
+            _logger?.LogWarning(
+                "Abandoning activity job {JobId} ({ActivityName}) because its lease was lost.",
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
             return null;
         }
 
@@ -205,6 +271,13 @@ public sealed class ActivityWorker(
         var shuttingDown = cancellationToken.IsCancellationRequested;
         if (shuttingDown && handlerError is not null)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, "shutdown");
+            RecordExecutionMetrics(leasedJob, started, "shutdown_abandoned");
+            _logger?.LogDebug(
+                "Abandoning failed activity job {JobId} ({ActivityName}) during shutdown.",
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
             return null;
         }
 
@@ -218,9 +291,42 @@ public sealed class ActivityWorker(
 
         if (handlerError is null)
         {
-            return await TryRecordAsync(() =>
+            var record = await TryRecordAsync(() =>
                 _store.RecordSuccessAsync(leasedJob.JobId, leasedJob.LeaseToken, resultJson, writeToken)
             );
+            if (record is { Error: null, LeaseHeld: true })
+            {
+                activity?.SetStatus(ActivityStatusCode.Ok);
+                RecordExecutionMetrics(leasedJob, started, "succeeded");
+                _logger?.LogInformation(
+                    "Activity job {JobId} ({ActivityName}) succeeded in {ElapsedMs}ms.",
+                    leasedJob.JobId,
+                    leasedJob.ActivityName,
+                    Stopwatch.GetElapsedTime(started).TotalMilliseconds
+                );
+            }
+            else if (record is { Error: null, LeaseHeld: false })
+            {
+                activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
+                RecordExecutionMetrics(leasedJob, started, "lease_lost");
+                _logger?.LogWarning(
+                    "Success for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
+                    leasedJob.JobId,
+                    leasedJob.ActivityName
+                );
+            }
+            else if (record.Error is not null)
+            {
+                activity?.SetStatus(ActivityStatusCode.Error, "success record failed");
+                _logger?.LogError(
+                    record.Error,
+                    "Failed to record success for activity job {JobId} ({ActivityName}).",
+                    leasedJob.JobId,
+                    leasedJob.ActivityName
+                );
+            }
+
+            return record.Error;
         }
 
         var retryable = leasedJob.Attempt < leasedJob.MaxAttempts;
@@ -228,7 +334,7 @@ public sealed class ActivityWorker(
             ? DateTimeOffset.UtcNow + _options.GetRetryDelay(leasedJob.Attempt)
             : null;
 
-        return await TryRecordAsync(() =>
+        var failureRecord = await TryRecordAsync(() =>
             _store.RecordFailureAsync(
                 leasedJob.JobId,
                 leasedJob.LeaseToken,
@@ -238,21 +344,73 @@ public sealed class ActivityWorker(
                 writeToken
             )
         );
+        if (failureRecord is { Error: null, LeaseHeld: true })
+        {
+            var outcome = retryable ? "failed_retrying" : "failed_terminal";
+            activity?.SetStatus(ActivityStatusCode.Error, handlerError.Message);
+            activity?.AddException(handlerError);
+            RecordExecutionMetrics(leasedJob, started, outcome);
+
+            if (retryable)
+            {
+                _logger?.LogWarning(
+                    handlerError,
+                    "Activity job {JobId} ({ActivityName}) failed on attempt {Attempt}/{MaxAttempts}; retrying at {NextVisibleAt}.",
+                    leasedJob.JobId,
+                    leasedJob.ActivityName,
+                    leasedJob.Attempt,
+                    leasedJob.MaxAttempts,
+                    nextVisibleAt
+                );
+            }
+            else
+            {
+                _logger?.LogError(
+                    handlerError,
+                    "Activity job {JobId} ({ActivityName}) failed terminally on attempt {Attempt}/{MaxAttempts}.",
+                    leasedJob.JobId,
+                    leasedJob.ActivityName,
+                    leasedJob.Attempt,
+                    leasedJob.MaxAttempts
+                );
+            }
+        }
+        else if (failureRecord is { Error: null, LeaseHeld: false })
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
+            RecordExecutionMetrics(leasedJob, started, "lease_lost");
+            _logger?.LogWarning(
+                "Failure for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
+        }
+        else if (failureRecord.Error is not null)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, "failure record failed");
+            _logger?.LogError(
+                failureRecord.Error,
+                "Failed to record failure for activity job {JobId} ({ActivityName}).",
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
+        }
+
+        return failureRecord.Error;
     }
 
     // A false return means the lease was lost (an expected race) — ignored, the new holder
     // records the outcome. A thrown exception means a real store error: it's returned so
     // RunOnceAsync can surface it, rather than being silently swallowed.
-    private static async Task<Exception?> TryRecordAsync(Func<ValueTask<bool>> record)
+    private static async Task<RecordAttempt> TryRecordAsync(Func<ValueTask<bool>> record)
     {
         try
         {
-            await record();
-            return null;
+            return new RecordAttempt(Error: null, LeaseHeld: await record());
         }
         catch (Exception ex)
         {
-            return ex;
+            return new RecordAttempt(ex, LeaseHeld: false);
         }
     }
 
@@ -293,6 +451,11 @@ public sealed class ActivityWorker(
                 }
                 else
                 {
+                    _logger?.LogWarning(
+                        "Lease renewal lost for activity job {JobId} ({ActivityName}).",
+                        leasedJob.JobId,
+                        leasedJob.ActivityName
+                    );
                     onLeaseLost();
                     return;
                 }
@@ -308,10 +471,37 @@ public sealed class ActivityWorker(
                 // job now and we must not keep running it. Otherwise retry on the next tick.
                 if (DateTimeOffset.UtcNow >= leaseExpiresAt)
                 {
+                    _logger?.LogWarning(
+                        "Lease renewal failed past expiry for activity job {JobId} ({ActivityName}).",
+                        leasedJob.JobId,
+                        leasedJob.ActivityName
+                    );
                     onLeaseLost();
                     return;
                 }
             }
         }
     }
+
+    private KeyValuePair<string, object?> WorkerTag =>
+        new("worker.id", _options.WorkerId);
+
+    private KeyValuePair<string, object?>[] ActivityTags(LeasedActivityJob job) =>
+        [
+            WorkerTag,
+            new("activity.name", job.ActivityName),
+            new("attempt", job.Attempt),
+        ];
+
+    private void RecordExecutionMetrics(LeasedActivityJob job, long started, string outcome)
+    {
+        var tags = ActivityTags(job).Append(new KeyValuePair<string, object?>("outcome", outcome)).ToArray();
+        PgWorkflowsTelemetry.Executions.Add(1, tags);
+        PgWorkflowsTelemetry.ExecutionDuration.Record(
+            Stopwatch.GetElapsedTime(started).TotalMilliseconds,
+            tags
+        );
+    }
+
+    private sealed record RecordAttempt(Exception? Error, bool LeaseHeld);
 }
