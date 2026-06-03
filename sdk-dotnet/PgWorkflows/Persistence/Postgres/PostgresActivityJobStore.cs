@@ -61,6 +61,8 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 null,
                 null,
                 null);
+
+            select pg_notify('pgworkflows_activity_jobs', '');
             """;
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);

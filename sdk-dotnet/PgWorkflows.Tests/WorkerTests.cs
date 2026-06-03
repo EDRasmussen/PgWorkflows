@@ -5,6 +5,7 @@ using PgWorkflows;
 using PgWorkflows.Activities;
 using PgWorkflows.Jobs;
 using PgWorkflows.Persistence;
+using PgWorkflows.Persistence.Postgres;
 using PgWorkflows.Workers;
 using Xunit;
 
@@ -100,6 +101,38 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         finally
         {
             await hostedService.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Idle_worker_wakes_when_activity_is_enqueued()
+    {
+        var registry = new ActivityRegistry();
+        registry.Register("notify-greet", static (string input) => $"hello {input}");
+        await using var wakeup = new PostgresActivityJobWakeup(DataSource);
+        var worker = new ActivityWorker(
+            registry,
+            Store,
+            Options("notify-worker") with { PollInterval = TimeSpan.FromSeconds(30) },
+            wakeup: wakeup
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+
+        try
+        {
+            await Task.Delay(500);
+            var jobId = await Store.EnqueueAsync("notify-greet", "world");
+            var job = await WaitForTerminalAsync(jobId, TimeSpan.FromSeconds(3));
+
+            Assert.Equal(JobStatus.Succeeded, job.Status);
+            Assert.Equal("hello world", job.GetResult<string>());
+        }
+        finally
+        {
+            cts.Cancel();
+            await SwallowCancellation(run);
         }
     }
 

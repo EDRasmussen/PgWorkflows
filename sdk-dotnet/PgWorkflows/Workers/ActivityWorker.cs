@@ -11,7 +11,8 @@ public sealed class ActivityWorker(
     ActivityRegistry registry,
     IActivityJobStore store,
     ActivityWorkerOptions? options = null,
-    ILogger<ActivityWorker>? logger = null
+    ILogger<ActivityWorker>? logger = null,
+    IActivityJobWakeup? wakeup = null
 )
 {
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
@@ -22,6 +23,7 @@ public sealed class ActivityWorker(
         store ?? throw new ArgumentNullException(nameof(store));
     private readonly ActivityWorkerOptions _options = options ?? new ActivityWorkerOptions();
     private readonly ILogger<ActivityWorker>? _logger = logger;
+    private readonly IActivityJobWakeup? _wakeup = wakeup;
 
     public async ValueTask<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -113,7 +115,14 @@ public sealed class ActivityWorker(
 
                 if (processed == 0)
                 {
-                    await Task.Delay(_options.PollInterval, cancellationToken);
+                    if (_wakeup is null)
+                    {
+                        await Task.Delay(_options.PollInterval, cancellationToken);
+                    }
+                    else
+                    {
+                        await _wakeup.WaitAsync(_options.PollInterval, cancellationToken);
+                    }
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
