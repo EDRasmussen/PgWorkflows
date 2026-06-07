@@ -5,5 +5,6 @@ public sealed record EnqueueActivityRequest(
     string ActivityName,
     string? InputJson,
     int MaxAttempts = 1,
-    DateTimeOffset? VisibleAt = null
+    DateTimeOffset? VisibleAt = null,
+    string? IdempotencyKey = null
 );

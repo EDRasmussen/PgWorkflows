@@ -65,6 +65,80 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     }
 
     [Fact]
+    public async Task Enqueue_with_same_activity_and_idempotency_key_returns_existing_job()
+    {
+        var first = await Store.EnqueueAsync("dedupe", "first", idempotencyKey: "order-1");
+        var second = await Store.EnqueueAsync("dedupe", "second", idempotencyKey: "order-1");
+
+        Assert.Equal(first, second);
+        Assert.Equal(1, await CountJobsAsync("dedupe", "order-1"));
+        var job = await Store.GetAsync(first);
+        Assert.Equal("order-1", job!.IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task Duplicate_idempotent_enqueue_runs_activity_once()
+    {
+        var executions = 0;
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>(
+            "dedupe-run",
+            input =>
+            {
+                Interlocked.Increment(ref executions);
+                return input;
+            }
+        );
+        var first = await Store.EnqueueAsync("dedupe-run", "first", idempotencyKey: "order-2");
+        var second = await Store.EnqueueAsync("dedupe-run", "second", idempotencyKey: "order-2");
+        var worker = new ActivityWorker(registry, Store, Options("w1"));
+
+        var firstBatch = await worker.RunOnceAsync();
+        var secondBatch = await worker.RunOnceAsync();
+
+        Assert.Equal(first, second);
+        Assert.Equal(1, firstBatch + secondBatch);
+        Assert.Equal(1, executions);
+        var job = await Store.GetAsync(first);
+        Assert.Equal(JobStatus.Succeeded, job!.Status);
+        Assert.Equal("first", job.GetResult<string>());
+    }
+
+    [Fact]
+    public async Task Same_idempotency_key_is_scoped_by_activity_name()
+    {
+        var first = await Store.EnqueueAsync("dedupe-a", "input", idempotencyKey: "shared-key");
+        var second = await Store.EnqueueAsync("dedupe-b", "input", idempotencyKey: "shared-key");
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(1, await CountJobsAsync("dedupe-a", "shared-key"));
+        Assert.Equal(1, await CountJobsAsync("dedupe-b", "shared-key"));
+    }
+
+    [Fact]
+    public async Task Null_idempotency_key_does_not_dedupe()
+    {
+        var first = await Store.EnqueueAsync("no-dedupe", "first");
+        var second = await Store.EnqueueAsync("no-dedupe", "second");
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(2, await CountJobsAsync("no-dedupe"));
+    }
+
+    [Fact]
+    public async Task Concurrent_enqueues_with_same_idempotency_key_create_one_job()
+    {
+        var ids = await Task.WhenAll(
+            Enumerable.Range(0, 32)
+                .Select(i => Store.EnqueueAsync("dedupe-concurrent", i, idempotencyKey: "order-3").AsTask())
+        );
+
+        var id = Assert.Single(ids.Distinct());
+        Assert.NotEqual(Guid.Empty, id);
+        Assert.Equal(1, await CountJobsAsync("dedupe-concurrent", "order-3"));
+    }
+
+    [Fact]
     public async Task Hosted_worker_registered_with_AddPgWorkflows_processes_activity()
     {
         var services = new ServiceCollection();
@@ -414,6 +488,22 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         }
 
         throw new TimeoutException($"Job {jobId} did not reach a terminal state in {timeout}.");
+    }
+
+    private async Task<long> CountJobsAsync(string activityName, string? idempotencyKey = null)
+    {
+        var sql = idempotencyKey is null
+            ? "select count(*) from pw_activity_jobs where activity_name = @activity_name and idempotency_key is null;"
+            : "select count(*) from pw_activity_jobs where activity_name = @activity_name and idempotency_key = @idempotency_key;";
+
+        await using var command = DataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("activity_name", activityName);
+        if (idempotencyKey is not null)
+        {
+            command.Parameters.AddWithValue("idempotency_key", idempotencyKey);
+        }
+
+        return (long)(await command.ExecuteScalarAsync())!;
     }
 
     /// <summary>Wraps the real store and throws on the first RecordSuccess to simulate a

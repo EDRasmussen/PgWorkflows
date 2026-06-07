@@ -11,7 +11,8 @@ public sealed record LeasedActivityJob(
     DateTimeOffset CreatedAt,
     DateTimeOffset VisibleAt,
     string LeaseToken,
-    DateTimeOffset LeaseExpiresAt)
+    DateTimeOffset LeaseExpiresAt,
+    string? IdempotencyKey = null)
     : ActivityJob(
         JobId,
         ActivityName,
@@ -22,4 +23,5 @@ public sealed record LeasedActivityJob(
         CreatedAt,
         VisibleAt,
         ResultJson: null,
-        Error: null);
+        Error: null,
+        IdempotencyKey);

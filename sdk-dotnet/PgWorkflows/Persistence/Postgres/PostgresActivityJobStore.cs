@@ -27,6 +27,10 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.ActivityName);
+        if (request.IdempotencyKey is not null && string.IsNullOrWhiteSpace(request.IdempotencyKey))
+        {
+            throw new ArgumentException("Idempotency key cannot be empty or whitespace.", nameof(request));
+        }
 
         var jobId = Guid.NewGuid();
         var createdAt = DateTimeOffset.UtcNow;
@@ -36,6 +40,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             insert into pw_activity_jobs (
                 job_id,
                 activity_name,
+                idempotency_key,
                 input,
                 status,
                 attempt,
@@ -50,6 +55,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             values (
                 @job_id,
                 @activity_name,
+                @idempotency_key,
                 @input,
                 @status,
                 @attempt,
@@ -60,15 +66,22 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 null,
                 null,
                 null,
-                null);
-
-            select pg_notify('pgworkflows_activity_jobs', '');
+                null)
+            on conflict (activity_name, idempotency_key)
+                where idempotency_key is not null
+            do update set idempotency_key = excluded.idempotency_key
+            returning job_id, xmax = 0 as inserted;
             """;
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("job_id", jobId);
         command.Parameters.AddWithValue("activity_name", request.ActivityName);
+        command.Parameters.AddWithValue(
+            "idempotency_key",
+            NpgsqlDbType.Text,
+            (object?)request.IdempotencyKey ?? DBNull.Value
+        );
         command.Parameters.AddWithValue(
             "input",
             NpgsqlDbType.Jsonb,
@@ -80,8 +93,26 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         command.Parameters.AddWithValue("created_at", createdAt);
         command.Parameters.AddWithValue("visible_at", visibleAt);
 
-        await command.ExecuteNonQueryAsync(cancellationToken);
-        return jobId;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            throw new InvalidOperationException("Enqueue did not return a job id.");
+        }
+
+        var enqueuedJobId = reader.GetGuid(0);
+        var inserted = reader.GetBoolean(1);
+        await reader.DisposeAsync();
+
+        if (inserted)
+        {
+            await using var notify = new NpgsqlCommand(
+                "select pg_notify('pgworkflows_activity_jobs', '');",
+                connection
+            );
+            await notify.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        return enqueuedJobId;
     }
 
     public async ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
@@ -119,6 +150,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             returning
                 jobs.job_id,
                 jobs.activity_name,
+                jobs.idempotency_key,
                 jobs.input,
                 jobs.attempt,
                 jobs.max_attempts,
@@ -146,13 +178,14 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 new LeasedActivityJob(
                     reader.GetGuid(0),
                     reader.GetString(1),
-                    ReadNullableString(reader, 2),
-                    reader.GetInt32(3),
+                    ReadNullableString(reader, 3),
                     reader.GetInt32(4),
-                    reader.GetFieldValue<DateTimeOffset>(5),
+                    reader.GetInt32(5),
                     reader.GetFieldValue<DateTimeOffset>(6),
-                    reader.GetString(7),
-                    reader.GetFieldValue<DateTimeOffset>(8)
+                    reader.GetFieldValue<DateTimeOffset>(7),
+                    reader.GetString(8),
+                    reader.GetFieldValue<DateTimeOffset>(9),
+                    ReadNullableString(reader, 2)
                 )
             );
         }
@@ -169,6 +202,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             select
                 job_id,
                 activity_name,
+                idempotency_key,
                 input,
                 status,
                 attempt,
@@ -194,14 +228,15 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         return new ActivityJob(
             reader.GetGuid(0),
             reader.GetString(1),
-            ReadNullableString(reader, 2),
-            ReadStatus(reader.GetString(3)),
-            reader.GetInt32(4),
+            ReadNullableString(reader, 3),
+            ReadStatus(reader.GetString(4)),
             reader.GetInt32(5),
-            reader.GetFieldValue<DateTimeOffset>(6),
+            reader.GetInt32(6),
             reader.GetFieldValue<DateTimeOffset>(7),
-            ReadNullableString(reader, 8),
-            ReadNullableString(reader, 9)
+            reader.GetFieldValue<DateTimeOffset>(8),
+            ReadNullableString(reader, 9),
+            ReadNullableString(reader, 10),
+            ReadNullableString(reader, 2)
         );
     }
 

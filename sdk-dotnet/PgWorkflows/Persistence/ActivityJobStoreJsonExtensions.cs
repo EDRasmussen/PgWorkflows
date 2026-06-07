@@ -13,14 +13,15 @@ public static class ActivityJobStoreJsonExtensions
         int maxAttempts = 1,
         DateTimeOffset? visibleAt = null,
         JsonSerializerOptions? jsonSerializerOptions = null,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        string? idempotencyKey = null
     )
     {
         ArgumentNullException.ThrowIfNull(store);
         var serializedInput = JsonSerializer.Serialize(input, jsonSerializerOptions);
 
         return store.EnqueueAsync(
-            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt),
+            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt, idempotencyKey),
             cancellationToken
         );
     }
@@ -32,7 +33,8 @@ public static class ActivityJobStoreJsonExtensions
         JsonTypeInfo<TInput> inputJsonTypeInfo,
         int maxAttempts = 1,
         DateTimeOffset? visibleAt = null,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        string? idempotencyKey = null
     )
     {
         ArgumentNullException.ThrowIfNull(store);
@@ -40,7 +42,7 @@ public static class ActivityJobStoreJsonExtensions
         var serializedInput = JsonSerializer.Serialize(input, inputJsonTypeInfo);
 
         return store.EnqueueAsync(
-            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt),
+            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt, idempotencyKey),
             cancellationToken
         );
     }

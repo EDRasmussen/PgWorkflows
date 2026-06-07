@@ -12,5 +12,6 @@ public record ActivityJob(
     DateTimeOffset CreatedAt,
     DateTimeOffset VisibleAt,
     string? ResultJson,
-    string? Error
+    string? Error,
+    string? IdempotencyKey = null
 );
