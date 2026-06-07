@@ -23,6 +23,8 @@ public abstract class PostgresTestBase : IAsyncLifetime
 
     protected PostgresActivityJobStore Store { get; private set; } = default!;
 
+    protected PostgresWorkflowStore WorkflowStore { get; private set; } = default!;
+
     public async Task InitializeAsync()
     {
         _databaseName = "pgw_" + Guid.NewGuid().ToString("N");
@@ -39,6 +41,7 @@ public abstract class PostgresTestBase : IAsyncLifetime
         };
         _dataSource = NpgsqlDataSource.Create(builder.ConnectionString);
         Store = new PostgresActivityJobStore(_dataSource);
+        WorkflowStore = new PostgresWorkflowStore(_dataSource);
         await Store.EnsureSchemaAsync();
     }
 

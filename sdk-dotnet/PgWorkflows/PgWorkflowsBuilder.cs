@@ -6,6 +6,7 @@ using Npgsql;
 using PgWorkflows.Activities;
 using PgWorkflows.Persistence;
 using PgWorkflows.Persistence.Postgres;
+using PgWorkflows.Workflows;
 using PgWorkflows.Workers;
 
 namespace PgWorkflows;
@@ -13,12 +14,18 @@ namespace PgWorkflows;
 public sealed class PgWorkflowsBuilder
 {
     private readonly ActivityRegistry _registry;
+    private readonly WorkflowRegistry _workflowRegistry;
     private readonly List<Action<IServiceProvider>> _deferredRegistrations = [];
 
-    internal PgWorkflowsBuilder(IServiceCollection services, ActivityRegistry registry)
+    internal PgWorkflowsBuilder(
+        IServiceCollection services,
+        ActivityRegistry registry,
+        WorkflowRegistry workflowRegistry
+    )
     {
         Services = services ?? throw new ArgumentNullException(nameof(services));
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        _workflowRegistry = workflowRegistry ?? throw new ArgumentNullException(nameof(workflowRegistry));
     }
 
     public IServiceCollection Services { get; }
@@ -113,63 +120,10 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
-    public PgWorkflowsBuilder RegisterActivity<TActivities, TInput, TOutput>(
-        string activityName,
-        Func<TActivities, Func<TInput, TOutput>> activityMethod,
-        JsonSerializerOptions? jsonSerializerOptions = null
-    )
-        where TActivities : class
+    public PgWorkflowsBuilder AddWorkflow<TWorkflow>()
+        where TWorkflow : class
     {
-        ArgumentNullException.ThrowIfNull(activityMethod);
-
-        _deferredRegistrations.Add(provider =>
-            _registry.RegisterActivity(
-                activityName,
-                () => ActivatorUtilities.GetServiceOrCreateInstance<TActivities>(provider),
-                activityMethod,
-                jsonSerializerOptions
-            )
-        );
-        return this;
-    }
-
-    public PgWorkflowsBuilder RegisterActivity<TActivities, TInput, TOutput>(
-        string activityName,
-        Func<TActivities, Func<TInput, ValueTask<TOutput>>> activityMethod,
-        JsonSerializerOptions? jsonSerializerOptions = null
-    )
-        where TActivities : class
-    {
-        ArgumentNullException.ThrowIfNull(activityMethod);
-
-        _deferredRegistrations.Add(provider =>
-            _registry.RegisterActivity(
-                activityName,
-                () => ActivatorUtilities.GetServiceOrCreateInstance<TActivities>(provider),
-                activityMethod,
-                jsonSerializerOptions
-            )
-        );
-        return this;
-    }
-
-    public PgWorkflowsBuilder RegisterActivity<TActivities, TInput, TOutput>(
-        string activityName,
-        Func<TActivities, Func<TInput, CancellationToken, ValueTask<TOutput>>> activityMethod,
-        JsonSerializerOptions? jsonSerializerOptions = null
-    )
-        where TActivities : class
-    {
-        ArgumentNullException.ThrowIfNull(activityMethod);
-
-        _deferredRegistrations.Add(provider =>
-            _registry.RegisterActivity(
-                activityName,
-                () => ActivatorUtilities.GetServiceOrCreateInstance<TActivities>(provider),
-                activityMethod,
-                jsonSerializerOptions
-            )
-        );
+        _workflowRegistry.Register<TWorkflow>();
         return this;
     }
 
@@ -379,6 +333,12 @@ public sealed class PgWorkflowsBuilder
         Services.AddSingleton<IActivityJobStore>(provider =>
             provider.GetRequiredService<PostgresActivityJobStore>()
         );
+        Services.AddSingleton<PostgresWorkflowStore>();
+        Services.AddSingleton<IWorkflowStore>(provider =>
+            provider.GetRequiredService<PostgresWorkflowStore>()
+        );
+        Services.AddSingleton<WorkflowRunner>();
+        Services.AddSingleton<IPgWorkflowClient, PgWorkflowClient>();
         Services.AddSingleton<PostgresActivityJobWakeup>();
         Services.AddSingleton<IActivityJobWakeup>(provider =>
             provider.GetRequiredService<PostgresActivityJobWakeup>()

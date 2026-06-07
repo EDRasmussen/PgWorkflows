@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using PgWorkflows.Activities;
 using PgWorkflows.Persistence;
+using PgWorkflows.Workflows;
 using PgWorkflows.Workers;
 
 namespace PgWorkflows;
@@ -16,10 +17,12 @@ public static class PgWorkflowsServiceCollectionExtensions
         ArgumentNullException.ThrowIfNull(services);
 
         var registry = new ActivityRegistry();
-        var builder = new PgWorkflowsBuilder(services, registry);
+        var workflowRegistry = new WorkflowRegistry();
+        var builder = new PgWorkflowsBuilder(services, registry, workflowRegistry);
         configure?.Invoke(builder);
 
         services.AddSingleton(registry);
+        services.AddSingleton(workflowRegistry);
         services.AddSingleton(builder.WorkerOptions);
         services.AddSingleton<ActivityWorker>();
         services.AddSingleton<IHostedService>(provider =>

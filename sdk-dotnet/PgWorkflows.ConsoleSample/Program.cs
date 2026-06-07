@@ -2,8 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using PgWorkflows;
 using PgWorkflows.Activities;
-using PgWorkflows.Jobs;
-using PgWorkflows.Persistence;
+using PgWorkflows.Workflows;
 
 var connectionString = Environment.GetEnvironmentVariable("PGWORKFLOWS_CONNECTION_STRING");
 if (string.IsNullOrWhiteSpace(connectionString))
@@ -24,46 +23,53 @@ builder.Services.AddPgWorkflows(pg =>
                 PollInterval = TimeSpan.FromMilliseconds(100),
             }
         )
+        .AddWorkflow<GreetingWorkflow>()
         .AddActivities<HelloActivities>()
 );
 
 using var app = builder.Build();
 await app.StartAsync();
 
-var store = app.Services.GetRequiredService<IActivityJobStore>();
-var helloId = await store.EnqueueAsync("hello", "Postgres");
-var goodbyeId = await store.EnqueueAsync("goodbye", 42);
-var hello = await WaitForTerminalAsync(store, helloId, TimeSpan.FromSeconds(10));
-var goodbye = await WaitForTerminalAsync(store, goodbyeId, TimeSpan.FromSeconds(10));
-
-Console.WriteLine($"Hello job id: {hello.JobId}");
-Console.WriteLine($"Hello status: {hello.Status}");
-Console.WriteLine($"Hello result: {hello.GetResult<string>() ?? "<null>"}");
-Console.WriteLine($"Goodbye job id: {goodbye.JobId}");
-Console.WriteLine($"Goodbye status: {goodbye.Status}");
-Console.WriteLine($"Goodbye result: {goodbye.GetResult<string>() ?? "<null>"}");
-
-await app.StopAsync();
-
-static async Task<ActivityJob> WaitForTerminalAsync(
-    IActivityJobStore store,
-    Guid jobId,
-    TimeSpan timeout
-)
+try
 {
-    using var deadline = new CancellationTokenSource(timeout);
-    while (!deadline.IsCancellationRequested)
+    var workflows = app.Services.GetRequiredService<IPgWorkflowClient>();
+    var handle = await workflows.StartAsync<GreetingWorkflow, GreetingWorkflowInput, string>(
+        new GreetingWorkflowInput("Postgres", 42),
+        idempotencyKey: "console-sample"
+    );
+    var result = await handle.GetResultAsync();
+
+    Console.WriteLine($"Workflow run id: {handle.WorkflowRunId}");
+    Console.WriteLine($"Workflow result: {result}");
+}
+finally
+{
+    await app.StopAsync();
+}
+
+internal sealed record GreetingWorkflowInput(string Name, int GoodbyeId);
+
+[Workflow("console-sample-workflow")]
+internal sealed class GreetingWorkflow
+{
+    [WorkflowRun]
+    public async ValueTask<string> RunAsync(
+        IWorkflowContext ctx,
+        GreetingWorkflowInput input,
+        CancellationToken cancellationToken
+    )
     {
-        var job = await store.GetAsync(jobId, deadline.Token);
-        if (job is { Status: JobStatus.Succeeded or JobStatus.Failed })
-        {
-            return job;
-        }
+        var hello = await ctx.Activity(
+            (HelloActivities activities) => activities.Hello(input.Name),
+            cancellationToken
+        );
+        var goodbye = await ctx.Activity(
+            (HelloActivities activities) => activities.Goodbye(input.GoodbyeId),
+            cancellationToken
+        );
 
-        await Task.Delay(100, deadline.Token);
+        return $"{hello} {goodbye}";
     }
-
-    throw new TimeoutException($"Job {jobId} did not reach a terminal state in {timeout}.");
 }
 
 internal sealed class HelloActivities

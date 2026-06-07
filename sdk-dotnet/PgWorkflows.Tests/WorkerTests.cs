@@ -41,11 +41,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         var registry = new ActivityRegistry();
         registry.Register("typed-greet", static (GreetingInput input) => new GreetingOutput($"hello {input.Name}"));
-        registry.RegisterActivity<GreetingActivities, GreetingInput, GreetingOutput>(
-            "uppercase",
-            new GreetingActivities(),
-            static activities => activities.Uppercase
-        );
+        registry.Register("uppercase", static (GreetingInput input) => new GreetingActivities().Uppercase(input));
         var greetingId = await Store.EnqueueAsync("typed-greet", new GreetingInput("world"));
         var uppercaseId = await Store.EnqueueAsync("uppercase", new GreetingInput("world"));
         var worker = new ActivityWorker(registry, Store, Options("w1"));
@@ -576,6 +572,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
     private sealed class GreetingActivities
     {
+        [Activity("uppercase")]
         public GreetingOutput Uppercase(GreetingInput input) =>
             new(input.Name.ToUpperInvariant());
     }
