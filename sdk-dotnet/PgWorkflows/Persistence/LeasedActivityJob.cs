@@ -1,5 +1,3 @@
-using PgWorkflows.Jobs;
-
 namespace PgWorkflows.Persistence;
 
 public sealed record LeasedActivityJob(
@@ -9,19 +7,7 @@ public sealed record LeasedActivityJob(
     int Attempt,
     int MaxAttempts,
     DateTimeOffset CreatedAt,
-    DateTimeOffset VisibleAt,
     string LeaseToken,
     DateTimeOffset LeaseExpiresAt,
-    string? IdempotencyKey = null)
-    : ActivityJob(
-        JobId,
-        ActivityName,
-        InputJson,
-        JobStatus.Leased,
-        Attempt,
-        MaxAttempts,
-        CreatedAt,
-        VisibleAt,
-        ResultJson: null,
-        Error: null,
-        IdempotencyKey);
+    string? IdempotencyKey = null
+);

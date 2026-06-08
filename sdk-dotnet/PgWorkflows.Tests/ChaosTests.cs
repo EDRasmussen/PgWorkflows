@@ -33,7 +33,7 @@ public sealed class ChaosTests(PostgresFixture fixture) : PostgresTestBase(fixtu
 
         for (var i = 0; i < jobCount; i++)
         {
-            await Store.EnqueueAsync("work", (object?)null, maxAttempts: 100);
+            await Store.EnqueueTypedAsync("work", (object?)null, maxAttempts: 100);
         }
 
         var options = new ActivityWorkerOptions

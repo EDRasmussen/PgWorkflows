@@ -1,6 +1,6 @@
 namespace PgWorkflows.Workflows;
 
-public sealed class PgWorkflowClient(
+internal sealed class PgWorkflowClient(
     WorkflowRegistry registry,
     WorkflowRunner runner,
     IServiceProvider serviceProvider,

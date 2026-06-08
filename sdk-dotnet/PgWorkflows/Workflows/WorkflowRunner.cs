@@ -4,7 +4,7 @@ using PgWorkflows.Persistence;
 
 namespace PgWorkflows.Workflows;
 
-public sealed class WorkflowRunner(
+internal sealed class WorkflowRunner(
     IWorkflowStore workflowStore,
     IActivityJobStore activityStore,
     JsonSerializerOptions? jsonSerializerOptions = null
@@ -203,12 +203,10 @@ public sealed class WorkflowRunner(
         if (activityJobId is null)
         {
             activityJobId = await _activityStore.EnqueueAsync(
-                new EnqueueActivityRequest(
-                    hook.ActivityName,
-                    hook.InputJson,
-                    IdempotencyKey: $"workflow:{hook.WorkflowRunId:N}:failure:{hook.HookSequence}"
-                ),
-                cancellationToken
+                hook.ActivityName,
+                hook.InputJson,
+                idempotencyKey: $"workflow:{hook.WorkflowRunId:N}:failure:{hook.HookSequence}",
+                cancellationToken: cancellationToken
             );
 
             await _workflowStore.RecordFailureHookScheduledAsync(

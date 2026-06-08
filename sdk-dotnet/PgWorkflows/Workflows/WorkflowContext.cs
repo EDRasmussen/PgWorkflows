@@ -234,22 +234,18 @@ internal sealed class WorkflowContext(
         if (activityJobId is null)
         {
             activityJobId = await _activityStore.EnqueueAsync(
-                new EnqueueActivityRequest(
-                    activityCall.ActivityName,
-                    activityCall.InputJson,
-                    IdempotencyKey: $"workflow:{WorkflowRunId:N}:{stepSequence}"
-                ),
-                cancellationToken
+                activityCall.ActivityName,
+                activityCall.InputJson,
+                idempotencyKey: $"workflow:{WorkflowRunId:N}:{stepSequence}",
+                cancellationToken: cancellationToken
             );
 
             await _workflowStore.RecordStepScheduledAsync(
-                new RecordWorkflowStepRequest(
-                    WorkflowRunId,
-                    stepSequence,
-                    activityCall.ActivityName,
-                    activityJobId.Value,
-                    activityCall.InputJson
-                ),
+                WorkflowRunId,
+                stepSequence,
+                activityCall.ActivityName,
+                activityJobId.Value,
+                activityCall.InputJson,
                 cancellationToken
             );
         }
@@ -309,12 +305,10 @@ internal sealed class WorkflowContext(
     {
         var hookSequence = _nextFailureHookSequence++;
         await _workflowStore.RecordFailureHookRegisteredAsync(
-            new RecordWorkflowFailureHookRequest(
-                WorkflowRunId,
-                hookSequence,
-                activityCall.ActivityName,
-                activityCall.InputJson
-            ),
+            WorkflowRunId,
+            hookSequence,
+            activityCall.ActivityName,
+            activityCall.InputJson,
             cancellationToken
         );
     }

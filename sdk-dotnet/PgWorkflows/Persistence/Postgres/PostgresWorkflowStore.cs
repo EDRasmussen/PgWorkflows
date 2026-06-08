@@ -135,17 +135,20 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     }
 
     public async ValueTask<IReadOnlyList<LeasedWorkflowRun>> LeaseRunsAsync(
-        LeaseWorkflowRunsRequest request,
+        string workerId,
+        int limit,
+        TimeSpan leaseDuration,
+        DateTimeOffset now,
+        int maxAttempts = 1,
         CancellationToken cancellationToken = default
     )
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
 
-        var limit = Math.Max(request.Limit, 1);
+        var clampedLimit = Math.Max(limit, 1);
         var leaseToken = Guid.NewGuid().ToString("N");
-        var leaseExpiresAt = request.Now.Add(request.LeaseDuration);
-        var staleUnleasedBefore = request.Now.Subtract(request.LeaseDuration);
+        var leaseExpiresAt = now.Add(leaseDuration);
+        var staleUnleasedBefore = now.Subtract(leaseDuration);
 
         const string sql = """
             with leased as (
@@ -177,12 +180,7 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
                 runs.status,
                 runs.attempt,
                 runs.max_attempts,
-                runs.visible_at,
                 runs.created_at,
-                runs.updated_at,
-                runs.completed_at,
-                runs.result,
-                runs.error,
                 runs.lease_token,
                 runs.lease_expires_at;
             """;
@@ -190,11 +188,11 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("pending_status", PendingStatus);
         command.Parameters.AddWithValue("running_status", RunningStatus);
-        command.Parameters.AddWithValue("now", request.Now);
+        command.Parameters.AddWithValue("now", now);
         command.Parameters.AddWithValue("stale_unleased_before", staleUnleasedBefore);
-        command.Parameters.AddWithValue("limit", limit);
-        command.Parameters.AddWithValue("max_attempts", Math.Max(request.MaxAttempts, 1));
-        command.Parameters.AddWithValue("worker_id", request.WorkerId);
+        command.Parameters.AddWithValue("limit", clampedLimit);
+        command.Parameters.AddWithValue("max_attempts", Math.Max(maxAttempts, 1));
+        command.Parameters.AddWithValue("worker_id", workerId);
         command.Parameters.AddWithValue("lease_token", leaseToken);
         command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
 
@@ -409,12 +407,15 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     }
 
     public async ValueTask RecordStepScheduledAsync(
-        RecordWorkflowStepRequest request,
+        Guid workflowRunId,
+        int stepSequence,
+        string activityName,
+        Guid activityJobId,
+        string? inputJson,
         CancellationToken cancellationToken = default
     )
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.ActivityName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activityName);
 
         var now = DateTimeOffset.UtcNow;
 
@@ -447,14 +448,14 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             """;
 
         await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("workflow_run_id", request.WorkflowRunId);
-        command.Parameters.AddWithValue("step_seq", request.StepSequence);
-        command.Parameters.AddWithValue("activity_name", request.ActivityName);
-        command.Parameters.AddWithValue("activity_job_id", request.ActivityJobId);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("step_seq", stepSequence);
+        command.Parameters.AddWithValue("activity_name", activityName);
+        command.Parameters.AddWithValue("activity_job_id", activityJobId);
         command.Parameters.AddWithValue(
             "input",
             NpgsqlDbType.Jsonb,
-            (object?)request.InputJson ?? DBNull.Value
+            (object?)inputJson ?? DBNull.Value
         );
         command.Parameters.AddWithValue("status", ScheduledStatus);
         command.Parameters.AddWithValue("created_at", now);
@@ -536,12 +537,14 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     }
 
     public async ValueTask RecordFailureHookRegisteredAsync(
-        RecordWorkflowFailureHookRequest request,
+        Guid workflowRunId,
+        int hookSequence,
+        string activityName,
+        string? inputJson,
         CancellationToken cancellationToken = default
     )
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.ActivityName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(activityName);
 
         var now = DateTimeOffset.UtcNow;
 
@@ -574,13 +577,13 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             """;
 
         await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("workflow_run_id", request.WorkflowRunId);
-        command.Parameters.AddWithValue("hook_seq", request.HookSequence);
-        command.Parameters.AddWithValue("activity_name", request.ActivityName);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("hook_seq", hookSequence);
+        command.Parameters.AddWithValue("activity_name", activityName);
         command.Parameters.AddWithValue(
             "input",
             NpgsqlDbType.Jsonb,
-            (object?)request.InputJson ?? DBNull.Value
+            (object?)inputJson ?? DBNull.Value
         );
         command.Parameters.AddWithValue("status", RegisteredStatus);
         command.Parameters.AddWithValue("created_at", now);
@@ -823,17 +826,12 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             reader.GetString(1),
             ReadNullableString(reader, 3),
             ReadRunStatus(reader.GetString(4)),
-            reader.GetFieldValue<DateTimeOffset>(8),
+            reader.GetFieldValue<DateTimeOffset>(7),
+            reader.GetString(8),
             reader.GetFieldValue<DateTimeOffset>(9),
-            ReadNullableDateTimeOffset(reader, 10),
-            ReadNullableString(reader, 11),
-            ReadNullableString(reader, 12),
-            reader.GetString(13),
-            reader.GetFieldValue<DateTimeOffset>(14),
             ReadNullableString(reader, 2),
             reader.GetInt32(5),
-            reader.GetInt32(6),
-            reader.GetFieldValue<DateTimeOffset>(7)
+            reader.GetInt32(6)
         );
 
     private static WorkflowStatus ReadRunStatus(string value) =>

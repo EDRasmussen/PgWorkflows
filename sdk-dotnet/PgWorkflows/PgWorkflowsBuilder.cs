@@ -360,9 +360,5 @@ public sealed class PgWorkflowsBuilder
                 executeWorkflowsInCaller: false
             )
         );
-        Services.AddSingleton<PostgresActivityJobWakeup>();
-        Services.AddSingleton<IActivityJobWakeup>(provider =>
-            provider.GetRequiredService<PostgresActivityJobWakeup>()
-        );
     }
 }

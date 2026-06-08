@@ -5,7 +5,7 @@ using PgWorkflows.Workflows;
 
 namespace PgWorkflows.Workers;
 
-public sealed class WorkflowWorker(
+internal sealed class WorkflowWorker(
     WorkflowRegistry registry,
     IWorkflowStore store,
     WorkflowRunner runner,
@@ -33,13 +33,11 @@ public sealed class WorkflowWorker(
         );
 
         var leasedRuns = await _store.LeaseRunsAsync(
-            new LeaseWorkflowRunsRequest(
-                _options.WorkerId,
-                leaseCount,
-                _options.LeaseDuration,
-                DateTimeOffset.UtcNow,
-                Math.Max(_options.MaxAttempts, 1)
-            ),
+            _options.WorkerId,
+            leaseCount,
+            _options.LeaseDuration,
+            DateTimeOffset.UtcNow,
+            Math.Max(_options.MaxAttempts, 1),
             cancellationToken
         );
 
@@ -291,7 +289,7 @@ public sealed class WorkflowWorker(
         {
             try
             {
-                await Task.Delay(_options.EffectiveRenewalInterval, stopToken);
+                await Task.Delay(TimeSpan.FromTicks(_options.LeaseDuration.Ticks / 3), stopToken);
                 var leaseExpiresAt = DateTimeOffset.UtcNow.Add(_options.LeaseDuration);
                 var renewed = await _store.RenewRunLeaseAsync(
                     leasedRun.WorkflowRunId,

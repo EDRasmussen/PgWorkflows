@@ -2,7 +2,7 @@ using PgWorkflows.Workflows;
 
 namespace PgWorkflows.Persistence;
 
-public interface IWorkflowStore
+internal interface IWorkflowStore
 {
     ValueTask<Guid> CreateRunAsync(
         CreateWorkflowRunRequest request,
@@ -12,7 +12,11 @@ public interface IWorkflowStore
     ValueTask<WorkflowRun?> GetRunAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
 
     ValueTask<IReadOnlyList<LeasedWorkflowRun>> LeaseRunsAsync(
-        LeaseWorkflowRunsRequest request,
+        string workerId,
+        int limit,
+        TimeSpan leaseDuration,
+        DateTimeOffset now,
+        int maxAttempts = 1,
         CancellationToken cancellationToken = default
     );
 
@@ -67,7 +71,11 @@ public interface IWorkflowStore
     );
 
     ValueTask RecordStepScheduledAsync(
-        RecordWorkflowStepRequest request,
+        Guid workflowRunId,
+        int stepSequence,
+        string activityName,
+        Guid activityJobId,
+        string? inputJson,
         CancellationToken cancellationToken = default
     );
 
@@ -91,7 +99,10 @@ public interface IWorkflowStore
     );
 
     ValueTask RecordFailureHookRegisteredAsync(
-        RecordWorkflowFailureHookRequest request,
+        Guid workflowRunId,
+        int hookSequence,
+        string activityName,
+        string? inputJson,
         CancellationToken cancellationToken = default
     );
 

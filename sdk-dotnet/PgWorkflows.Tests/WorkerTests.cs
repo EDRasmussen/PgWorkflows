@@ -23,7 +23,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         var registry = new ActivityRegistry();
         registry.Register("greet", static (string input) => $"hello {input}");
-        var jobId = await Store.EnqueueAsync("greet", "world");
+        var jobId = await Store.EnqueueTypedAsync("greet", "world");
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var processed = await worker.RunOnceAsync();
@@ -42,8 +42,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var registry = new ActivityRegistry();
         registry.Register("typed-greet", static (GreetingInput input) => new GreetingOutput($"hello {input.Name}"));
         registry.Register("uppercase", static (GreetingInput input) => new GreetingActivities().Uppercase(input));
-        var greetingId = await Store.EnqueueAsync("typed-greet", new GreetingInput("world"));
-        var uppercaseId = await Store.EnqueueAsync("uppercase", new GreetingInput("world"));
+        var greetingId = await Store.EnqueueTypedAsync("typed-greet", new GreetingInput("world"));
+        var uppercaseId = await Store.EnqueueTypedAsync("uppercase", new GreetingInput("world"));
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var firstBatch = await worker.RunOnceAsync();
@@ -63,8 +63,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     [Fact]
     public async Task Enqueue_with_same_activity_and_idempotency_key_returns_existing_job()
     {
-        var first = await Store.EnqueueAsync("dedupe", "first", idempotencyKey: "order-1");
-        var second = await Store.EnqueueAsync("dedupe", "second", idempotencyKey: "order-1");
+        var first = await Store.EnqueueTypedAsync("dedupe", "first", idempotencyKey: "order-1");
+        var second = await Store.EnqueueTypedAsync("dedupe", "second", idempotencyKey: "order-1");
 
         Assert.Equal(first, second);
         Assert.Equal(1, await CountJobsAsync("dedupe", "order-1"));
@@ -85,8 +85,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return input;
             }
         );
-        var first = await Store.EnqueueAsync("dedupe-run", "first", idempotencyKey: "order-2");
-        var second = await Store.EnqueueAsync("dedupe-run", "second", idempotencyKey: "order-2");
+        var first = await Store.EnqueueTypedAsync("dedupe-run", "first", idempotencyKey: "order-2");
+        var second = await Store.EnqueueTypedAsync("dedupe-run", "second", idempotencyKey: "order-2");
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var firstBatch = await worker.RunOnceAsync();
@@ -103,8 +103,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     [Fact]
     public async Task Same_idempotency_key_is_scoped_by_activity_name()
     {
-        var first = await Store.EnqueueAsync("dedupe-a", "input", idempotencyKey: "shared-key");
-        var second = await Store.EnqueueAsync("dedupe-b", "input", idempotencyKey: "shared-key");
+        var first = await Store.EnqueueTypedAsync("dedupe-a", "input", idempotencyKey: "shared-key");
+        var second = await Store.EnqueueTypedAsync("dedupe-b", "input", idempotencyKey: "shared-key");
 
         Assert.NotEqual(first, second);
         Assert.Equal(1, await CountJobsAsync("dedupe-a", "shared-key"));
@@ -114,8 +114,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     [Fact]
     public async Task Null_idempotency_key_does_not_dedupe()
     {
-        var first = await Store.EnqueueAsync("no-dedupe", "first");
-        var second = await Store.EnqueueAsync("no-dedupe", "second");
+        var first = await Store.EnqueueTypedAsync("no-dedupe", "first");
+        var second = await Store.EnqueueTypedAsync("no-dedupe", "second");
 
         Assert.NotEqual(first, second);
         Assert.Equal(2, await CountJobsAsync("no-dedupe"));
@@ -126,7 +126,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         var ids = await Task.WhenAll(
             Enumerable.Range(0, 32)
-                .Select(i => Store.EnqueueAsync("dedupe-concurrent", i, idempotencyKey: "order-3").AsTask())
+                .Select(i => Store.EnqueueTypedAsync("dedupe-concurrent", i, idempotencyKey: "order-3").AsTask())
         );
 
         var id = Assert.Single(ids.Distinct());
@@ -158,8 +158,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
         try
         {
-            var greetId = await Store.EnqueueAsync("hosted-greet", "world");
-            var repeatId = await Store.EnqueueAsync("hosted-repeat", 2);
+            var greetId = await Store.EnqueueTypedAsync("hosted-greet", "world");
+            var repeatId = await Store.EnqueueTypedAsync("hosted-repeat", 2);
             var greet = await WaitForTerminalAsync(greetId, TimeSpan.FromSeconds(10));
             var repeat = await WaitForTerminalAsync(repeatId, TimeSpan.FromSeconds(10));
 
@@ -171,38 +171,6 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         finally
         {
             await hostedService.StopAsync(CancellationToken.None);
-        }
-    }
-
-    [Fact]
-    public async Task Idle_worker_wakes_when_activity_is_enqueued()
-    {
-        var registry = new ActivityRegistry();
-        registry.Register("notify-greet", static (string input) => $"hello {input}");
-        await using var wakeup = new PostgresActivityJobWakeup(DataSource);
-        var worker = new ActivityWorker(
-            registry,
-            Store,
-            Options("notify-worker") with { PollInterval = TimeSpan.FromSeconds(30) },
-            wakeup: wakeup
-        );
-
-        using var cts = new CancellationTokenSource();
-        var run = worker.RunAsync(cts.Token);
-
-        try
-        {
-            await Task.Delay(500);
-            var jobId = await Store.EnqueueAsync("notify-greet", "world");
-            var job = await WaitForTerminalAsync(jobId, TimeSpan.FromSeconds(3));
-
-            Assert.Equal(JobStatus.Succeeded, job.Status);
-            Assert.Equal("hello world", job.GetResult<string>());
-        }
-        finally
-        {
-            cts.Cancel();
-            await SwallowCancellation(run);
         }
     }
 
@@ -219,7 +187,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 throw new InvalidOperationException("boom");
             }
         );
-        var jobId = await Store.EnqueueAsync("boom", (object?)null, maxAttempts: 3);
+        var jobId = await Store.EnqueueTypedAsync("boom", (object?)null, maxAttempts: 3);
         var worker = new ActivityWorker(
             registry,
             Store,
@@ -255,7 +223,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return "done";
             }
         );
-        var jobId = await Store.EnqueueAsync("slow", (object?)null, maxAttempts: 5);
+        var jobId = await Store.EnqueueTypedAsync("slow", (object?)null, maxAttempts: 5);
 
         var lease = TimeSpan.FromSeconds(1);
         var workerA = new ActivityWorker(registry, Store, Options("A") with { LeaseDuration = lease });
@@ -297,7 +265,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return "recovered";
             }
         );
-        var jobId = await Store.EnqueueAsync("stalls-then-recovers", (object?)null, maxAttempts: 5);
+        var jobId = await Store.EnqueueTypedAsync("stalls-then-recovers", (object?)null, maxAttempts: 5);
 
         var lease = TimeSpan.FromSeconds(1);
         var deadWorker = new ActivityWorker(registry, Store, Options("dead") with { LeaseDuration = lease });
@@ -326,18 +294,12 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // leaving the current holder's result as the one that stands. (The crash/reclaim
         // E2E path abandons before committing, so this guard is only reachable directly.)
         var past = DateTimeOffset.UtcNow.AddMinutes(-2);
-        var jobId = await Store.EnqueueAsync(
-            new EnqueueActivityRequest("x", null, MaxAttempts: 5, VisibleAt: past)
-        );
+        var jobId = await Store.EnqueueAsync("x", null, maxAttempts: 5, visibleAt: past);
 
         // First holder leases as-of the past with a short duration, so its lease is
         // already expired by the time the second worker reclaims as-of now.
-        var stale = await Store.LeaseAsync(
-            new LeaseActivityJobsRequest("old", 1, TimeSpan.FromSeconds(1), past.AddSeconds(30))
-        );
-        var fresh = await Store.LeaseAsync(
-            new LeaseActivityJobsRequest("new", 1, TimeSpan.FromSeconds(30), DateTimeOffset.UtcNow)
-        );
+        var stale = await Store.LeaseAsync("old", 1, TimeSpan.FromSeconds(1), past.AddSeconds(30));
+        var fresh = await Store.LeaseAsync("new", 1, TimeSpan.FromSeconds(30), DateTimeOffset.UtcNow);
 
         Assert.Equal(jobId, Assert.Single(stale).JobId);
         Assert.Equal(jobId, Assert.Single(fresh).JobId);
@@ -376,7 +338,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var ids = new List<Guid>();
         for (var i = 0; i < 3; i++)
         {
-            ids.Add(await Store.EnqueueAsync("slow", i.ToString(), maxAttempts: 5));
+            ids.Add(await Store.EnqueueTypedAsync("slow", i.ToString(), maxAttempts: 5));
         }
 
         var lease = TimeSpan.FromMilliseconds(400);
@@ -433,7 +395,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var ids = new List<Guid>();
         for (var i = 0; i < jobCount; i++)
         {
-            ids.Add(await Store.EnqueueAsync("ok", i.ToString(), maxAttempts: 5));
+            ids.Add(await Store.EnqueueTypedAsync("ok", i.ToString(), maxAttempts: 5));
         }
 
         // Fails exactly the first commit; every other write records normally.
@@ -510,11 +472,22 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
         public int SuccessAttempts => Volatile.Read(ref _successAttempts);
 
-        public ValueTask<Guid> EnqueueAsync(EnqueueActivityRequest r, CancellationToken ct = default) =>
-            inner.EnqueueAsync(r, ct);
+        public ValueTask<Guid> EnqueueAsync(
+            string activityName,
+            string? inputJson,
+            int maxAttempts = 1,
+            DateTimeOffset? visibleAt = null,
+            string? idempotencyKey = null,
+            CancellationToken cancellationToken = default
+        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, cancellationToken);
 
-        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(LeaseActivityJobsRequest r, CancellationToken ct = default) =>
-            inner.LeaseAsync(r, ct);
+        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
+            string workerId,
+            int batchSize,
+            TimeSpan leaseDuration,
+            DateTimeOffset now,
+            CancellationToken cancellationToken = default
+        ) => inner.LeaseAsync(workerId, batchSize, leaseDuration, now, cancellationToken);
 
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);

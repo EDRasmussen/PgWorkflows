@@ -4,9 +4,9 @@ using PgWorkflows.Jobs;
 
 namespace PgWorkflows.Persistence;
 
-public static class ActivityJobStoreJsonExtensions
+internal static class ActivityJobStoreJsonExtensions
 {
-    public static ValueTask<Guid> EnqueueAsync<TInput>(
+    public static ValueTask<Guid> EnqueueTypedAsync<TInput>(
         this IActivityJobStore store,
         string activityName,
         TInput input,
@@ -21,12 +21,16 @@ public static class ActivityJobStoreJsonExtensions
         var serializedInput = JsonSerializer.Serialize(input, jsonSerializerOptions);
 
         return store.EnqueueAsync(
-            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt, idempotencyKey),
+            activityName,
+            serializedInput,
+            maxAttempts,
+            visibleAt,
+            idempotencyKey,
             cancellationToken
         );
     }
 
-    public static ValueTask<Guid> EnqueueAsync<TInput>(
+    public static ValueTask<Guid> EnqueueTypedAsync<TInput>(
         this IActivityJobStore store,
         string activityName,
         TInput input,
@@ -42,7 +46,11 @@ public static class ActivityJobStoreJsonExtensions
         var serializedInput = JsonSerializer.Serialize(input, inputJsonTypeInfo);
 
         return store.EnqueueAsync(
-            new EnqueueActivityRequest(activityName, serializedInput, maxAttempts, visibleAt, idempotencyKey),
+            activityName,
+            serializedInput,
+            maxAttempts,
+            visibleAt,
+            idempotencyKey,
             cancellationToken
         );
     }

@@ -7,12 +7,11 @@ using PgWorkflows.Persistence;
 
 namespace PgWorkflows.Workers;
 
-public sealed class ActivityWorker(
+internal sealed class ActivityWorker(
     ActivityRegistry registry,
     IActivityJobStore store,
     ActivityWorkerOptions? options = null,
-    ILogger<ActivityWorker>? logger = null,
-    IActivityJobWakeup? wakeup = null
+    ILogger<ActivityWorker>? logger = null
 )
 {
     private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
@@ -23,7 +22,6 @@ public sealed class ActivityWorker(
         store ?? throw new ArgumentNullException(nameof(store));
     private readonly ActivityWorkerOptions _options = options ?? new ActivityWorkerOptions();
     private readonly ILogger<ActivityWorker>? _logger = logger;
-    private readonly IActivityJobWakeup? _wakeup = wakeup;
 
     public async ValueTask<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
@@ -36,12 +34,10 @@ public sealed class ActivityWorker(
         );
 
         var leasedJobs = await _store.LeaseAsync(
-            new LeaseActivityJobsRequest(
-                _options.WorkerId,
-                leaseCount,
-                _options.LeaseDuration,
-                DateTimeOffset.UtcNow
-            ),
+            _options.WorkerId,
+            leaseCount,
+            _options.LeaseDuration,
+            DateTimeOffset.UtcNow,
             cancellationToken
         );
 
@@ -55,15 +51,6 @@ public sealed class ActivityWorker(
             _options.WorkerId,
             leasedJobs.Count
         );
-        PgWorkflowsTelemetry.LeasedJobs.Add(leasedJobs.Count, WorkerTag);
-
-        foreach (var leasedJob in leasedJobs)
-        {
-            PgWorkflowsTelemetry.LeaseAge.Record(
-                Math.Max(0, (DateTimeOffset.UtcNow - leasedJob.CreatedAt).TotalMilliseconds),
-                ActivityTags(leasedJob)
-            );
-        }
 
         // A job whose outcome couldn't be recorded (a real store error, distinct from the
         // expected "lease lost" race) is collected rather than thrown from the body —
@@ -115,14 +102,7 @@ public sealed class ActivityWorker(
 
                 if (processed == 0)
                 {
-                    if (_wakeup is null)
-                    {
-                        await Task.Delay(_options.PollInterval, cancellationToken);
-                    }
-                    else
-                    {
-                        await _wakeup.WaitAsync(_options.PollInterval, cancellationToken);
-                    }
+                    await Task.Delay(_options.PollInterval, cancellationToken);
                 }
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -150,7 +130,6 @@ public sealed class ActivityWorker(
                     _options.WorkerId,
                     delay.TotalMilliseconds
                 );
-                PgWorkflowsTelemetry.WorkerFailures.Add(1, WorkerTag);
                 try
                 {
                     await Task.Delay(delay, cancellationToken);
@@ -265,7 +244,6 @@ public sealed class ActivityWorker(
         if (leaseLost)
         {
             activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
-            RecordExecutionMetrics(leasedJob, started, "lease_lost");
             _logger?.LogWarning(
                 "Abandoning activity job {JobId} ({ActivityName}) because its lease was lost.",
                 leasedJob.JobId,
@@ -281,7 +259,6 @@ public sealed class ActivityWorker(
         if (shuttingDown && handlerError is not null)
         {
             activity?.SetStatus(ActivityStatusCode.Error, "shutdown");
-            RecordExecutionMetrics(leasedJob, started, "shutdown_abandoned");
             _logger?.LogDebug(
                 "Abandoning failed activity job {JobId} ({ActivityName}) during shutdown.",
                 leasedJob.JobId,
@@ -294,7 +271,7 @@ public sealed class ActivityWorker(
         // with a fresh, time-limited token instead — it must complete the record without
         // being aborted, but must not hang graceful shutdown indefinitely.
         using var writeCts = shuttingDown
-            ? new CancellationTokenSource(_options.ShutdownWriteTimeout)
+            ? new CancellationTokenSource(TimeSpan.FromSeconds(5))
             : null;
         var writeToken = writeCts?.Token ?? cancellationToken;
 
@@ -306,7 +283,6 @@ public sealed class ActivityWorker(
             if (record is { Error: null, LeaseHeld: true })
             {
                 activity?.SetStatus(ActivityStatusCode.Ok);
-                RecordExecutionMetrics(leasedJob, started, "succeeded");
                 _logger?.LogInformation(
                     "Activity job {JobId} ({ActivityName}) succeeded in {ElapsedMs}ms.",
                     leasedJob.JobId,
@@ -317,7 +293,6 @@ public sealed class ActivityWorker(
             else if (record is { Error: null, LeaseHeld: false })
             {
                 activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
-                RecordExecutionMetrics(leasedJob, started, "lease_lost");
                 _logger?.LogWarning(
                     "Success for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
                     leasedJob.JobId,
@@ -355,10 +330,8 @@ public sealed class ActivityWorker(
         );
         if (failureRecord is { Error: null, LeaseHeld: true })
         {
-            var outcome = retryable ? "failed_retrying" : "failed_terminal";
             activity?.SetStatus(ActivityStatusCode.Error, handlerError.Message);
             activity?.AddException(handlerError);
-            RecordExecutionMetrics(leasedJob, started, outcome);
 
             if (retryable)
             {
@@ -387,7 +360,6 @@ public sealed class ActivityWorker(
         else if (failureRecord is { Error: null, LeaseHeld: false })
         {
             activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
-            RecordExecutionMetrics(leasedJob, started, "lease_lost");
             _logger?.LogWarning(
                 "Failure for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
                 leasedJob.JobId,
@@ -429,7 +401,7 @@ public sealed class ActivityWorker(
         CancellationToken stopToken
     )
     {
-        var interval = _options.EffectiveRenewalInterval;
+        var interval = TimeSpan.FromTicks(_options.LeaseDuration.Ticks / 3);
         var leaseExpiresAt = leasedJob.LeaseExpiresAt;
 
         while (true)
@@ -490,26 +462,6 @@ public sealed class ActivityWorker(
                 }
             }
         }
-    }
-
-    private KeyValuePair<string, object?> WorkerTag =>
-        new("worker.id", _options.WorkerId);
-
-    private KeyValuePair<string, object?>[] ActivityTags(LeasedActivityJob job) =>
-        [
-            WorkerTag,
-            new("activity.name", job.ActivityName),
-            new("attempt", job.Attempt),
-        ];
-
-    private void RecordExecutionMetrics(LeasedActivityJob job, long started, string outcome)
-    {
-        var tags = ActivityTags(job).Append(new KeyValuePair<string, object?>("outcome", outcome)).ToArray();
-        PgWorkflowsTelemetry.Executions.Add(1, tags);
-        PgWorkflowsTelemetry.ExecutionDuration.Record(
-            Stopwatch.GetElapsedTime(started).TotalMilliseconds,
-            tags
-        );
     }
 
     private sealed record RecordAttempt(Exception? Error, bool LeaseHeld);

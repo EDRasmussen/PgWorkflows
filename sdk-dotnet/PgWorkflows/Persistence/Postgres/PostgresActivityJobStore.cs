@@ -21,20 +21,23 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
     }
 
     public async ValueTask<Guid> EnqueueAsync(
-        EnqueueActivityRequest request,
+        string activityName,
+        string? inputJson,
+        int maxAttempts = 1,
+        DateTimeOffset? visibleAt = null,
+        string? idempotencyKey = null,
         CancellationToken cancellationToken = default
     )
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.ActivityName);
-        if (request.IdempotencyKey is not null && string.IsNullOrWhiteSpace(request.IdempotencyKey))
+        ArgumentException.ThrowIfNullOrWhiteSpace(activityName);
+        if (idempotencyKey is not null && string.IsNullOrWhiteSpace(idempotencyKey))
         {
-            throw new ArgumentException("Idempotency key cannot be empty or whitespace.", nameof(request));
+            throw new ArgumentException("Idempotency key cannot be empty or whitespace.", nameof(idempotencyKey));
         }
 
         var jobId = Guid.NewGuid();
         var createdAt = DateTimeOffset.UtcNow;
-        var visibleAt = request.VisibleAt ?? createdAt;
+        var resolvedVisibleAt = visibleAt ?? createdAt;
 
         const string sql = """
             insert into pw_activity_jobs (
@@ -70,28 +73,27 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             on conflict (activity_name, idempotency_key)
                 where idempotency_key is not null
             do update set idempotency_key = excluded.idempotency_key
-            returning job_id, xmax = 0 as inserted;
+            returning job_id;
             """;
 
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection);
+        await using var command = _dataSource.CreateCommand(sql);
         command.Parameters.AddWithValue("job_id", jobId);
-        command.Parameters.AddWithValue("activity_name", request.ActivityName);
+        command.Parameters.AddWithValue("activity_name", activityName);
         command.Parameters.AddWithValue(
             "idempotency_key",
             NpgsqlDbType.Text,
-            (object?)request.IdempotencyKey ?? DBNull.Value
+            (object?)idempotencyKey ?? DBNull.Value
         );
         command.Parameters.AddWithValue(
             "input",
             NpgsqlDbType.Jsonb,
-            (object?)request.InputJson ?? DBNull.Value
+            (object?)inputJson ?? DBNull.Value
         );
         command.Parameters.AddWithValue("status", PendingStatus);
         command.Parameters.AddWithValue("attempt", 0);
-        command.Parameters.AddWithValue("max_attempts", Math.Max(request.MaxAttempts, 1));
+        command.Parameters.AddWithValue("max_attempts", Math.Max(maxAttempts, 1));
         command.Parameters.AddWithValue("created_at", createdAt);
-        command.Parameters.AddWithValue("visible_at", visibleAt);
+        command.Parameters.AddWithValue("visible_at", resolvedVisibleAt);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -99,32 +101,21 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             throw new InvalidOperationException("Enqueue did not return a job id.");
         }
 
-        var enqueuedJobId = reader.GetGuid(0);
-        var inserted = reader.GetBoolean(1);
-        await reader.DisposeAsync();
-
-        if (inserted)
-        {
-            await using var notify = new NpgsqlCommand(
-                "select pg_notify('pgworkflows_activity_jobs', '');",
-                connection
-            );
-            await notify.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        return enqueuedJobId;
+        return reader.GetGuid(0);
     }
 
     public async ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
-        LeaseActivityJobsRequest request,
+        string workerId,
+        int batchSize,
+        TimeSpan leaseDuration,
+        DateTimeOffset now,
         CancellationToken cancellationToken = default
     )
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkerId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
 
-        var leaseToken = $"{request.WorkerId}/{Guid.NewGuid():N}";
-        var leaseExpiresAt = request.Now + request.LeaseDuration;
+        var leaseToken = $"{workerId}/{Guid.NewGuid():N}";
+        var leaseExpiresAt = now + leaseDuration;
 
         const string sql = """
             with candidate_jobs as (
@@ -155,7 +146,6 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 jobs.attempt,
                 jobs.max_attempts,
                 jobs.created_at,
-                jobs.visible_at,
                 jobs.lease_token,
                 jobs.lease_expires_at;
             """;
@@ -164,10 +154,10 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var command = new NpgsqlCommand(sql, connection);
-        command.Parameters.AddWithValue("now", request.Now);
+        command.Parameters.AddWithValue("now", now);
         command.Parameters.AddWithValue("pending_status", PendingStatus);
         command.Parameters.AddWithValue("leased_status", LeasedStatus);
-        command.Parameters.AddWithValue("batch_size", Math.Max(request.BatchSize, 1));
+        command.Parameters.AddWithValue("batch_size", Math.Max(batchSize, 1));
         command.Parameters.AddWithValue("lease_token", leaseToken);
         command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
 
@@ -182,9 +172,8 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                     reader.GetInt32(4),
                     reader.GetInt32(5),
                     reader.GetFieldValue<DateTimeOffset>(6),
-                    reader.GetFieldValue<DateTimeOffset>(7),
-                    reader.GetString(8),
-                    reader.GetFieldValue<DateTimeOffset>(9),
+                    reader.GetString(7),
+                    reader.GetFieldValue<DateTimeOffset>(8),
                     ReadNullableString(reader, 2)
                 )
             );

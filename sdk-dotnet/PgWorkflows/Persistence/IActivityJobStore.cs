@@ -2,15 +2,22 @@ using PgWorkflows.Jobs;
 
 namespace PgWorkflows.Persistence;
 
-public interface IActivityJobStore
+internal interface IActivityJobStore
 {
     ValueTask<Guid> EnqueueAsync(
-        EnqueueActivityRequest request,
+        string activityName,
+        string? inputJson,
+        int maxAttempts = 1,
+        DateTimeOffset? visibleAt = null,
+        string? idempotencyKey = null,
         CancellationToken cancellationToken = default
     );
 
     ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
-        LeaseActivityJobsRequest request,
+        string workerId,
+        int batchSize,
+        TimeSpan leaseDuration,
+        DateTimeOffset now,
         CancellationToken cancellationToken = default
     );
 
