@@ -12,5 +12,8 @@ public sealed record LeasedWorkflowRun(
     string? Error,
     string LeaseToken,
     DateTimeOffset LeaseExpiresAt,
-    string? IdempotencyKey = null
+    string? IdempotencyKey = null,
+    int Attempt = 0,
+    int MaxAttempts = 1,
+    DateTimeOffset VisibleAt = default
 );

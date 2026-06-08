@@ -12,5 +12,8 @@ public sealed record WorkflowRun(
     DateTimeOffset? CompletedAt,
     string? ResultJson,
     string? Error,
-    string? IdempotencyKey = null
+    string? IdempotencyKey = null,
+    int Attempt = 0,
+    int MaxAttempts = 1,
+    DateTimeOffset VisibleAt = default
 );

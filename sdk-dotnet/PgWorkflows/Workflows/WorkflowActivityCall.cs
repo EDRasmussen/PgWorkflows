@@ -7,6 +7,24 @@ namespace PgWorkflows.Workflows;
 
 internal sealed record WorkflowActivityCall(string ActivityName, string? InputJson)
 {
+    public static WorkflowActivityCall FromExpression<TActivities>(
+        Expression<Action<TActivities>> expression,
+        JsonSerializerOptions? jsonSerializerOptions
+    ) =>
+        FromExpressionBody(expression.Body, jsonSerializerOptions);
+
+    public static WorkflowActivityCall FromExpression<TActivities>(
+        Expression<Func<TActivities, Task>> expression,
+        JsonSerializerOptions? jsonSerializerOptions
+    ) =>
+        FromExpressionBody(expression.Body, jsonSerializerOptions);
+
+    public static WorkflowActivityCall FromExpression<TActivities>(
+        Expression<Func<TActivities, ValueTask>> expression,
+        JsonSerializerOptions? jsonSerializerOptions
+    ) =>
+        FromExpressionBody(expression.Body, jsonSerializerOptions);
+
     public static WorkflowActivityCall FromExpression<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> expression,
         JsonSerializerOptions? jsonSerializerOptions

@@ -20,8 +20,24 @@ internal sealed class WorkflowContext(
     private readonly JsonSerializerOptions? _jsonSerializerOptions = jsonSerializerOptions;
     private readonly TimeSpan _activityPollInterval = activityPollInterval;
     private int _nextStepSequence;
+    private int _nextFailureHookSequence;
 
     public Guid WorkflowRunId { get; } = workflowRunId;
+
+    public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
+        Expression<Func<TActivities, TOutput>> activityCall
+    ) =>
+        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
+
+    public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
+        Expression<Func<TActivities, Task<TOutput>>> activityCall
+    ) =>
+        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
+
+    public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
+        Expression<Func<TActivities, ValueTask<TOutput>>> activityCall
+    ) =>
+        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
 
     public ValueTask<TOutput> Activity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall,
@@ -50,12 +66,152 @@ internal sealed class WorkflowContext(
             cancellationToken
         );
 
+    public ValueTask OnFailure<TActivities>(
+        Expression<Action<TActivities>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public ValueTask OnFailure<TActivities>(
+        Expression<Func<TActivities, Task>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public ValueTask OnFailure<TActivities>(
+        Expression<Func<TActivities, ValueTask>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public ValueTask OnFailure<TActivities, TOutput>(
+        Expression<Func<TActivities, TOutput>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public ValueTask OnFailure<TActivities, TOutput>(
+        Expression<Func<TActivities, Task<TOutput>>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public ValueTask OnFailure<TActivities, TOutput>(
+        Expression<Func<TActivities, ValueTask<TOutput>>> activityCall,
+        CancellationToken cancellationToken = default
+    ) =>
+        RegisterFailureHookAsync(
+            WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions),
+            cancellationToken
+        );
+
+    public async ValueTask<TOutput[]> WhenAll<TOutput>(
+        IEnumerable<WorkflowActivity<TOutput>> activities,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(activities);
+
+        var activityCalls = activities.Select(GetCall).ToArray();
+        if (activityCalls.Length == 0)
+        {
+            return [];
+        }
+
+        var firstStepSequence = ReserveStepSequences(activityCalls.Length);
+        var tasks = new Task<TOutput>[activityCalls.Length];
+        for (var index = 0; index < activityCalls.Length; index++)
+        {
+            tasks[index] = RunActivityStepAsync<TOutput>(
+                firstStepSequence + index,
+                activityCalls[index],
+                cancellationToken
+            ).AsTask();
+        }
+
+        return await Task.WhenAll(tasks);
+    }
+
+    public async ValueTask<(T1 First, T2 Second)> WhenAll<T1, T2>(
+        WorkflowActivity<T1> first,
+        WorkflowActivity<T2> second,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var firstStepSequence = ReserveStepSequences(2);
+        var firstTask = RunActivityStepAsync<T1>(
+            firstStepSequence,
+            GetCall(first),
+            cancellationToken
+        ).AsTask();
+        var secondTask = RunActivityStepAsync<T2>(
+            firstStepSequence + 1,
+            GetCall(second),
+            cancellationToken
+        ).AsTask();
+
+        await Task.WhenAll(firstTask, secondTask);
+        return (await firstTask, await secondTask);
+    }
+
+    public async ValueTask<(T1 First, T2 Second, T3 Third)> WhenAll<T1, T2, T3>(
+        WorkflowActivity<T1> first,
+        WorkflowActivity<T2> second,
+        WorkflowActivity<T3> third,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var firstStepSequence = ReserveStepSequences(3);
+        var firstTask = RunActivityStepAsync<T1>(
+            firstStepSequence,
+            GetCall(first),
+            cancellationToken
+        ).AsTask();
+        var secondTask = RunActivityStepAsync<T2>(
+            firstStepSequence + 1,
+            GetCall(second),
+            cancellationToken
+        ).AsTask();
+        var thirdTask = RunActivityStepAsync<T3>(
+            firstStepSequence + 2,
+            GetCall(third),
+            cancellationToken
+        ).AsTask();
+
+        await Task.WhenAll(firstTask, secondTask, thirdTask);
+        return (await firstTask, await secondTask, await thirdTask);
+    }
+
     private async ValueTask<TOutput> RunActivityStepAsync<TOutput>(
         WorkflowActivityCall activityCall,
         CancellationToken cancellationToken
     )
     {
-        var stepSequence = _nextStepSequence++;
+        var stepSequence = ReserveStepSequences(1);
+        return await RunActivityStepAsync<TOutput>(stepSequence, activityCall, cancellationToken);
+    }
+
+    private async ValueTask<TOutput> RunActivityStepAsync<TOutput>(
+        int stepSequence,
+        WorkflowActivityCall activityCall,
+        CancellationToken cancellationToken
+    )
+    {
         var step = await _workflowStore.GetStepAsync(
             WorkflowRunId,
             stepSequence,
@@ -138,6 +294,36 @@ internal sealed class WorkflowContext(
             await Task.Delay(_activityPollInterval, cancellationToken);
         }
     }
+
+    private int ReserveStepSequences(int count)
+    {
+        var firstStepSequence = _nextStepSequence;
+        _nextStepSequence += count;
+        return firstStepSequence;
+    }
+
+    private async ValueTask RegisterFailureHookAsync(
+        WorkflowActivityCall activityCall,
+        CancellationToken cancellationToken
+    )
+    {
+        var hookSequence = _nextFailureHookSequence++;
+        await _workflowStore.RecordFailureHookRegisteredAsync(
+            new RecordWorkflowFailureHookRequest(
+                WorkflowRunId,
+                hookSequence,
+                activityCall.ActivityName,
+                activityCall.InputJson
+            ),
+            cancellationToken
+        );
+    }
+
+    private static WorkflowActivityCall GetCall<TOutput>(WorkflowActivity<TOutput> activity) =>
+        activity.Call
+        ?? throw new InvalidOperationException(
+            "Workflow activities passed to WhenAll must be created by IWorkflowContext.CallActivity."
+        );
 
     private TOutput DeserializeResult<TOutput>(string? resultJson) =>
         resultJson is null

@@ -51,6 +51,15 @@ public interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    ValueTask<bool> RecordRunFailureAsync(
+        Guid workflowRunId,
+        string error,
+        string leaseToken,
+        bool retryable,
+        DateTimeOffset? nextVisibleAt,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask<WorkflowStep?> GetStepAsync(
         Guid workflowRunId,
         int stepSequence,
@@ -72,6 +81,37 @@ public interface IWorkflowStore
     ValueTask RecordStepFailureAsync(
         Guid workflowRunId,
         int stepSequence,
+        string error,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask<IReadOnlyList<WorkflowFailureHook>> ListFailureHooksAsync(
+        Guid workflowRunId,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask RecordFailureHookRegisteredAsync(
+        RecordWorkflowFailureHookRequest request,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask RecordFailureHookScheduledAsync(
+        Guid workflowRunId,
+        int hookSequence,
+        Guid activityJobId,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask RecordFailureHookSuccessAsync(
+        Guid workflowRunId,
+        int hookSequence,
+        string? resultJson,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask RecordFailureHookFailureAsync(
+        Guid workflowRunId,
+        int hookSequence,
         string error,
         CancellationToken cancellationToken = default
     );

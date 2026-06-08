@@ -14,6 +14,11 @@ public sealed record WorkflowWorkerOptions
 
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(250);
 
+    public int MaxAttempts { get; init; } = 1;
+
+    public Func<int, TimeSpan> GetRetryDelay { get; init; } =
+        static attempt => TimeSpan.FromSeconds(Math.Min(Math.Max(attempt, 1) * 5, 60));
+
     internal TimeSpan EffectiveRenewalInterval =>
         LeaseRenewalInterval is { } interval
         && interval > TimeSpan.Zero

@@ -4,5 +4,6 @@ public sealed record LeaseWorkflowRunsRequest(
     string WorkerId,
     int Limit,
     TimeSpan LeaseDuration,
-    DateTimeOffset Now
+    DateTimeOffset Now,
+    int MaxAttempts = 1
 );

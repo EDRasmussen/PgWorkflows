@@ -4,5 +4,7 @@ namespace PgWorkflows.Workflows;
 public sealed record CreateWorkflowRunRequest(
     string WorkflowName,
     string? InputJson,
-    string? IdempotencyKey = null
+    string? IdempotencyKey = null,
+    int MaxAttempts = 1,
+    DateTimeOffset? VisibleAt = null
 );

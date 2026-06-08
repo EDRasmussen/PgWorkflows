@@ -37,7 +37,8 @@ public sealed class WorkflowWorker(
                 _options.WorkerId,
                 leaseCount,
                 _options.LeaseDuration,
-                DateTimeOffset.UtcNow
+                DateTimeOffset.UtcNow,
+                Math.Max(_options.MaxAttempts, 1)
             ),
             cancellationToken
         );
@@ -193,11 +194,89 @@ public sealed class WorkflowWorker(
                 leasedRun.WorkflowName
             );
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            await RecordWorkflowFailureAsync(leasedRun, ex, runCts.Token);
+        }
         finally
         {
             runCts.Cancel();
             await renewer;
         }
+    }
+
+    private async Task RecordWorkflowFailureAsync(
+        LeasedWorkflowRun leasedRun,
+        Exception ex,
+        CancellationToken cancellationToken
+    )
+    {
+        var retryable = leasedRun.Attempt < leasedRun.MaxAttempts;
+        var nextVisibleAt = retryable
+            ? DateTimeOffset.UtcNow.Add(_options.GetRetryDelay(leasedRun.Attempt))
+            : (DateTimeOffset?)null;
+        var error = ex.ToString();
+
+        if (!retryable)
+        {
+            try
+            {
+                await _runner.RunFailureHooksAsync(leasedRun.WorkflowRunId, cancellationToken);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (InvalidOperationException hookEx)
+            {
+                error = $"{error}{Environment.NewLine}Failure hook error:{Environment.NewLine}{hookEx}";
+            }
+        }
+
+        var recorded = await _store.RecordRunFailureAsync(
+            leasedRun.WorkflowRunId,
+            error,
+            leasedRun.LeaseToken,
+            retryable,
+            nextVisibleAt,
+            CancellationToken.None
+        );
+
+        if (!recorded)
+        {
+            _logger?.LogWarning(
+                "Failure for workflow run {WorkflowRunId} ({WorkflowName}) was not recorded because the lease was lost.",
+                leasedRun.WorkflowRunId,
+                leasedRun.WorkflowName
+            );
+            return;
+        }
+
+        if (retryable)
+        {
+            _logger?.LogInformation(
+                "Workflow run {WorkflowRunId} ({WorkflowName}) failed on attempt {Attempt}/{MaxAttempts}; retrying at {NextVisibleAt}.",
+                leasedRun.WorkflowRunId,
+                leasedRun.WorkflowName,
+                leasedRun.Attempt,
+                leasedRun.MaxAttempts,
+                nextVisibleAt
+            );
+            return;
+        }
+
+        _logger?.LogWarning(
+            ex,
+            "Workflow run {WorkflowRunId} ({WorkflowName}) failed terminally on attempt {Attempt}/{MaxAttempts}.",
+            leasedRun.WorkflowRunId,
+            leasedRun.WorkflowName,
+            leasedRun.Attempt,
+            leasedRun.MaxAttempts
+        );
     }
 
     private async Task RenewLeaseLoopAsync(

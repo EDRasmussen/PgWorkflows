@@ -1,4 +1,5 @@
 using System.Text.Json;
+using PgWorkflows.Jobs;
 using PgWorkflows.Persistence;
 
 namespace PgWorkflows.Workflows;
@@ -59,6 +60,18 @@ public sealed class WorkflowRunner(
         CancellationToken cancellationToken = default
     ) =>
         await ExecuteCoreAsync(workflowRunId, workflow, serviceProvider, leaseToken, cancellationToken);
+
+    internal async ValueTask RunFailureHooksAsync(
+        Guid workflowRunId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        var hooks = await _workflowStore.ListFailureHooksAsync(workflowRunId, cancellationToken);
+        foreach (var hook in hooks)
+        {
+            await RunFailureHookAsync(hook, cancellationToken);
+        }
+    }
 
     internal async ValueTask<TOutput> WaitForResultAsync<TOutput>(
         Guid workflowRunId,
@@ -162,23 +175,88 @@ public sealed class WorkflowRunner(
             if (leaseToken is null)
             {
                 await _workflowStore.RecordRunFailureAsync(workflowRunId, ex.ToString(), CancellationToken.None);
-            }
-            else
-            {
-                var recorded = await _workflowStore.RecordRunFailureAsync(
-                    workflowRunId,
-                    ex.ToString(),
-                    leaseToken,
-                    CancellationToken.None
-                );
-
-                if (recorded)
-                {
-                    return null;
-                }
+                throw;
             }
 
             throw;
+        }
+    }
+
+    private async ValueTask RunFailureHookAsync(
+        WorkflowFailureHook hook,
+        CancellationToken cancellationToken
+    )
+    {
+        if (hook.Status == WorkflowFailureHookStatus.Succeeded)
+        {
+            return;
+        }
+
+        if (hook.Status == WorkflowFailureHookStatus.Failed)
+        {
+            throw new InvalidOperationException(
+                $"Workflow failure hook {hook.HookSequence} previously failed: {hook.Error}"
+            );
+        }
+
+        var activityJobId = hook.ActivityJobId;
+        if (activityJobId is null)
+        {
+            activityJobId = await _activityStore.EnqueueAsync(
+                new EnqueueActivityRequest(
+                    hook.ActivityName,
+                    hook.InputJson,
+                    IdempotencyKey: $"workflow:{hook.WorkflowRunId:N}:failure:{hook.HookSequence}"
+                ),
+                cancellationToken
+            );
+
+            await _workflowStore.RecordFailureHookScheduledAsync(
+                hook.WorkflowRunId,
+                hook.HookSequence,
+                activityJobId.Value,
+                cancellationToken
+            );
+        }
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var job = await _activityStore.GetAsync(activityJobId.Value, cancellationToken);
+            if (job is null)
+            {
+                throw new InvalidOperationException(
+                    $"Activity job '{activityJobId}' for workflow failure hook {hook.HookSequence} was not found."
+                );
+            }
+
+            if (job.Status == JobStatus.Succeeded)
+            {
+                await _workflowStore.RecordFailureHookSuccessAsync(
+                    hook.WorkflowRunId,
+                    hook.HookSequence,
+                    job.ResultJson,
+                    cancellationToken
+                );
+                return;
+            }
+
+            if (job.Status == JobStatus.Failed)
+            {
+                var error = job.Error ?? "Failure hook activity failed.";
+                await _workflowStore.RecordFailureHookFailureAsync(
+                    hook.WorkflowRunId,
+                    hook.HookSequence,
+                    error,
+                    cancellationToken
+                );
+                throw new InvalidOperationException(
+                    $"Workflow failure hook {hook.HookSequence} failed: {error}"
+                );
+            }
+
+            await Task.Delay(ActivityPollInterval, cancellationToken);
         }
     }
 

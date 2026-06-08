@@ -37,6 +37,9 @@ public static class PostgresSchema
             idempotency_key text null,
             input jsonb null,
             status text not null,
+            attempt integer not null,
+            max_attempts integer not null,
+            visible_at timestamptz not null,
             created_at timestamptz not null,
             updated_at timestamptz not null,
             completed_at timestamptz null,
@@ -59,12 +62,21 @@ public static class PostgresSchema
         alter table pw_workflow_runs
             add column if not exists lease_expires_at timestamptz null;
 
+        alter table pw_workflow_runs
+            add column if not exists attempt integer not null default 0;
+
+        alter table pw_workflow_runs
+            add column if not exists max_attempts integer not null default 1;
+
+        alter table pw_workflow_runs
+            add column if not exists visible_at timestamptz not null default now();
+
         create unique index if not exists ux_pw_workflow_runs_idempotency
             on pw_workflow_runs (workflow_name, idempotency_key)
             where idempotency_key is not null;
 
         create index if not exists ix_pw_workflow_runs_runnable
-            on pw_workflow_runs (created_at)
+            on pw_workflow_runs (visible_at, created_at)
             where status in ('pending', 'running');
 
         create table if not exists pw_workflow_steps (
@@ -84,5 +96,24 @@ public static class PostgresSchema
 
         create unique index if not exists ux_pw_workflow_steps_activity_job
             on pw_workflow_steps (activity_job_id);
+
+        create table if not exists pw_workflow_failure_hooks (
+            workflow_run_id uuid not null references pw_workflow_runs(workflow_run_id) on delete cascade,
+            hook_seq integer not null,
+            activity_name text not null,
+            activity_job_id uuid null references pw_activity_jobs(job_id),
+            input jsonb null,
+            status text not null,
+            created_at timestamptz not null,
+            updated_at timestamptz not null,
+            completed_at timestamptz null,
+            result jsonb null,
+            error text null,
+            primary key (workflow_run_id, hook_seq)
+        );
+
+        create unique index if not exists ux_pw_workflow_failure_hooks_activity_job
+            on pw_workflow_failure_hooks (activity_job_id)
+            where activity_job_id is not null;
         """;
 }
