@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using PgWorkflows.Activities;
 using PgWorkflows.Workers;
 using PgWorkflows.Workflows;
@@ -149,11 +150,151 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         }
     }
 
+    [Fact]
+    public async Task Hosted_workflow_worker_processes_started_workflow_without_caller_driving_result()
+    {
+        var activities = new TestActivities();
+        var services = new ServiceCollection();
+        services.AddSingleton(activities);
+        services.AddPgWorkflows(pg =>
+            pg.UsePostgres(DataSource, ensureSchemaOnStart: false)
+                .ConfigureActivityWorker(options =>
+                    options with
+                    {
+                        WorkerId = "hosted-activity-worker",
+                        BatchSize = 1,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                    }
+                )
+                .ConfigureWorkflowWorker(options =>
+                    options with
+                    {
+                        WorkerId = "hosted-workflow-worker",
+                        BatchSize = 1,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                    }
+                )
+                .AddActivities<TestActivities>()
+                .AddWorkflow<ClientGreetingWorkflow>()
+        );
+
+        await using var provider = services.BuildServiceProvider();
+        var hostedService = Assert.Single(provider.GetServices<IHostedService>());
+        await hostedService.StartAsync(CancellationToken.None);
+
+        try
+        {
+            var client = provider.GetRequiredService<IPgWorkflowClient>();
+            var handle = await client.StartAsync<ClientGreetingWorkflow, string, string>("world");
+            var run = await WaitForWorkflowTerminalAsync(handle.WorkflowRunId, TimeSpan.FromSeconds(10));
+            var result = await handle.GetResultAsync();
+
+            Assert.Equal(WorkflowStatus.Succeeded, run.Status);
+            Assert.Equal("HELLO WORLD", result);
+            Assert.Equal(1, activities.GreetExecutions);
+            Assert.Equal(1, activities.UppercaseExecutions);
+        }
+        finally
+        {
+            await hostedService.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Hosted_workflow_worker_treats_recorded_workflow_failure_as_processed()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<FailingWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<FailingWorkflow, string, string>("world");
+
+        var processed = await worker.RunOnceAsync();
+
+        Assert.Equal(1, processed);
+        var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Failed, run!.Status);
+        Assert.Contains("boom world", run.Error);
+        Assert.Equal(0, await worker.RunOnceAsync());
+    }
+
+    [Fact]
+    public async Task Hosted_workflow_worker_reclaims_stale_unleased_running_run()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<ImmediateWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions() with { LeaseDuration = TimeSpan.FromMilliseconds(50) }
+        );
+        var handle = await client.StartAsync<ImmediateWorkflow, string, string>("world");
+        await WorkflowStore.MarkRunRunningAsync(handle.WorkflowRunId);
+        await MarkWorkflowRunStaleAsync(handle.WorkflowRunId);
+
+        var processed = await worker.RunOnceAsync();
+
+        Assert.Equal(1, processed);
+        var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Succeeded, run!.Status);
+        Assert.Equal("done world", System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!));
+    }
+
     private async Task<WorkflowRun> SingleWorkflowRunAsync()
     {
         await using var command = DataSource.CreateCommand("select workflow_run_id from pw_workflow_runs;");
         var runId = (Guid)(await command.ExecuteScalarAsync())!;
         return (await WorkflowStore.GetRunAsync(runId))!;
+    }
+
+    private async Task MarkWorkflowRunStaleAsync(Guid workflowRunId)
+    {
+        await using var command = DataSource.CreateCommand(
+            """
+            update pw_workflow_runs
+            set updated_at = @updated_at
+            where workflow_run_id = @workflow_run_id;
+            """
+        );
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow.Subtract(TimeSpan.FromMinutes(1)));
+        await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task<WorkflowRun> WaitForWorkflowTerminalAsync(Guid workflowRunId, TimeSpan timeout)
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            cts.Token.ThrowIfCancellationRequested();
+
+            var run = await WorkflowStore.GetRunAsync(workflowRunId, cts.Token);
+            if (run is { Status: WorkflowStatus.Succeeded or WorkflowStatus.Failed })
+            {
+                return run;
+            }
+
+            await Task.Delay(10, cts.Token);
+        }
     }
 
     private IPgWorkflowClient CreateClient<TWorkflow>()
@@ -177,6 +318,14 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         new()
         {
             WorkerId = workerId,
+            BatchSize = 1,
+            PollInterval = TimeSpan.FromMilliseconds(10),
+        };
+
+    private static WorkflowWorkerOptions WorkflowWorkerOptions() =>
+        new()
+        {
+            WorkerId = "workflow-worker",
             BatchSize = 1,
             PollInterval = TimeSpan.FromMilliseconds(10),
         };
@@ -297,6 +446,21 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             Interlocked.Increment(ref _executions);
             return $"custom {name}";
         }
+    }
+
+    [Workflow]
+    public sealed class FailingWorkflow
+    {
+        [WorkflowRun]
+        public string Run(IWorkflowContext _, string name) =>
+            throw new InvalidOperationException($"boom {name}");
+    }
+
+    [Workflow]
+    public sealed class ImmediateWorkflow
+    {
+        [WorkflowRun]
+        public string Run(IWorkflowContext _, string name) => $"done {name}";
     }
 
 }

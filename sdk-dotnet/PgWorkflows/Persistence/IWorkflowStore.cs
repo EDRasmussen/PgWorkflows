@@ -11,7 +11,19 @@ public interface IWorkflowStore
 
     ValueTask<WorkflowRun?> GetRunAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
 
+    ValueTask<IReadOnlyList<LeasedWorkflowRun>> LeaseRunsAsync(
+        LeaseWorkflowRunsRequest request,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask MarkRunRunningAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
+
+    ValueTask<bool> RenewRunLeaseAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    );
 
     ValueTask RecordRunSuccessAsync(
         Guid workflowRunId,
@@ -19,9 +31,23 @@ public interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    ValueTask<bool> RecordRunSuccessAsync(
+        Guid workflowRunId,
+        string? resultJson,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask RecordRunFailureAsync(
         Guid workflowRunId,
         string error,
+        CancellationToken cancellationToken = default
+    );
+
+    ValueTask<bool> RecordRunFailureAsync(
+        Guid workflowRunId,
+        string error,
+        string leaseToken,
         CancellationToken cancellationToken = default
     );
 

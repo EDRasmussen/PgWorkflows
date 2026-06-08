@@ -53,6 +53,25 @@ public sealed class WorkflowRegistry
         );
     }
 
+    internal bool TryResolve(string workflowName, out WorkflowDefinition? definition)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workflowName);
+
+        lock (_gate)
+        {
+            if (
+                _workflowTypesByName.TryGetValue(workflowName, out var workflowType)
+                && _definitions.TryGetValue(workflowType, out definition)
+            )
+            {
+                return true;
+            }
+        }
+
+        definition = null;
+        return false;
+    }
+
     private static WorkflowDefinition CreateDefinition(Type workflowType)
     {
         var workflowAttribute = workflowType.GetCustomAttribute<WorkflowAttribute>()

@@ -41,15 +41,31 @@ public static class PostgresSchema
             updated_at timestamptz not null,
             completed_at timestamptz null,
             result jsonb null,
-            error text null
+            error text null,
+            workflow_worker_id text null,
+            lease_token text null,
+            lease_expires_at timestamptz null
         );
 
         alter table pw_workflow_runs
             add column if not exists idempotency_key text null;
 
+        alter table pw_workflow_runs
+            add column if not exists workflow_worker_id text null;
+
+        alter table pw_workflow_runs
+            add column if not exists lease_token text null;
+
+        alter table pw_workflow_runs
+            add column if not exists lease_expires_at timestamptz null;
+
         create unique index if not exists ux_pw_workflow_runs_idempotency
             on pw_workflow_runs (workflow_name, idempotency_key)
             where idempotency_key is not null;
+
+        create index if not exists ix_pw_workflow_runs_runnable
+            on pw_workflow_runs (created_at)
+            where status in ('pending', 'running');
 
         create table if not exists pw_workflow_steps (
             workflow_run_id uuid not null references pw_workflow_runs(workflow_run_id) on delete cascade,

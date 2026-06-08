@@ -23,7 +23,8 @@ public static class PgWorkflowsServiceCollectionExtensions
 
         services.AddSingleton(registry);
         services.AddSingleton(workflowRegistry);
-        services.AddSingleton(builder.WorkerOptions);
+        services.AddSingleton(builder.ActivityWorkerOptions);
+        services.AddSingleton(builder.WorkflowWorkerOptions);
         services.AddSingleton<ActivityWorker>();
         services.AddSingleton<IHostedService>(provider =>
         {
@@ -32,6 +33,7 @@ public static class PgWorkflowsServiceCollectionExtensions
             return new PgWorkflowsHostedService(
                 provider.GetRequiredService<ActivityWorker>(),
                 provider.GetRequiredService<IActivityJobStore>(),
+                provider.GetService<WorkflowWorker>(),
                 builder.EnsurePostgresSchemaOnStart
             );
         });

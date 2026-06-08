@@ -8,14 +8,17 @@ namespace PgWorkflows;
 internal sealed class PgWorkflowsHostedService(
     ActivityWorker worker,
     IActivityJobStore store,
+    WorkflowWorker? workflowWorker,
     bool ensurePostgresSchemaOnStart
 ) : IHostedService
 {
     private readonly ActivityWorker _worker = worker ?? throw new ArgumentNullException(nameof(worker));
     private readonly IActivityJobStore _store = store ?? throw new ArgumentNullException(nameof(store));
+    private readonly WorkflowWorker? _workflowWorker = workflowWorker;
     private readonly bool _ensurePostgresSchemaOnStart = ensurePostgresSchemaOnStart;
     private CancellationTokenSource? _stopping;
-    private Task? _runTask;
+    private Task? _activityRunTask;
+    private Task? _workflowRunTask;
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
@@ -25,17 +28,23 @@ internal sealed class PgWorkflowsHostedService(
         }
 
         _stopping = new CancellationTokenSource();
-        _runTask = _worker.RunAsync(_stopping.Token);
+        _activityRunTask = _worker.RunAsync(_stopping.Token);
+        _workflowRunTask = _workflowWorker?.RunAsync(_stopping.Token);
 
-        if (_runTask.IsCompleted)
+        if (_activityRunTask.IsCompleted)
         {
-            await _runTask;
+            await _activityRunTask;
+        }
+
+        if (_workflowRunTask is { IsCompleted: true })
+        {
+            await _workflowRunTask;
         }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_runTask is null || _stopping is null)
+        if (_activityRunTask is null || _stopping is null)
         {
             return;
         }
@@ -44,7 +53,10 @@ internal sealed class PgWorkflowsHostedService(
 
         try
         {
-            await _runTask.WaitAsync(cancellationToken);
+            Task[] tasks = _workflowRunTask is null
+                ? [_activityRunTask]
+                : [_activityRunTask, _workflowRunTask];
+            await Task.WhenAll(tasks).WaitAsync(cancellationToken);
         }
         finally
         {

@@ -118,6 +118,73 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         );
     }
 
+    public async ValueTask<IReadOnlyList<LeasedWorkflowRun>> LeaseRunsAsync(
+        LeaseWorkflowRunsRequest request,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkerId);
+
+        var limit = Math.Max(request.Limit, 1);
+        var leaseToken = Guid.NewGuid().ToString("N");
+        var leaseExpiresAt = request.Now.Add(request.LeaseDuration);
+        var staleUnleasedBefore = request.Now.Subtract(request.LeaseDuration);
+
+        const string sql = """
+            with leased as (
+                select workflow_run_id
+                from pw_workflow_runs
+                where status = @pending_status
+                   or (status = @running_status and lease_expires_at <= @now)
+                   or (status = @running_status and lease_expires_at is null and updated_at <= @stale_unleased_before)
+                order by created_at
+                for update skip locked
+                limit @limit
+            )
+            update pw_workflow_runs as runs
+            set status = @running_status,
+                updated_at = @now,
+                workflow_worker_id = @worker_id,
+                lease_token = @lease_token,
+                lease_expires_at = @lease_expires_at
+            from leased
+            where runs.workflow_run_id = leased.workflow_run_id
+            returning
+                runs.workflow_run_id,
+                runs.workflow_name,
+                runs.idempotency_key,
+                runs.input,
+                runs.status,
+                runs.created_at,
+                runs.updated_at,
+                runs.completed_at,
+                runs.result,
+                runs.error,
+                runs.lease_token,
+                runs.lease_expires_at;
+            """;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("pending_status", PendingStatus);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("now", request.Now);
+        command.Parameters.AddWithValue("stale_unleased_before", staleUnleasedBefore);
+        command.Parameters.AddWithValue("limit", limit);
+        command.Parameters.AddWithValue("worker_id", request.WorkerId);
+        command.Parameters.AddWithValue("lease_token", leaseToken);
+        command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
+
+        var runs = new List<LeasedWorkflowRun>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            runs.Add(ReadLeasedWorkflowRun(reader));
+        }
+
+        return runs;
+    }
+
     public ValueTask MarkRunRunningAsync(
         Guid workflowRunId,
         CancellationToken cancellationToken = default
@@ -131,6 +198,34 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             cancellationToken
         );
 
+    public async ValueTask<bool> RenewRunLeaseAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        const string sql = """
+            update pw_workflow_runs
+            set updated_at = @updated_at,
+                lease_expires_at = @lease_expires_at
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+              and status = @running_status;
+            """;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("lease_token", leaseToken);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
+
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
     public ValueTask RecordRunSuccessAsync(
         Guid workflowRunId,
         string? resultJson,
@@ -138,6 +233,22 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     ) =>
         UpdateRunAsync(
             workflowRunId,
+            SucceededStatus,
+            resultJson,
+            error: null,
+            completedAt: DateTimeOffset.UtcNow,
+            cancellationToken
+        );
+
+    public ValueTask<bool> RecordRunSuccessAsync(
+        Guid workflowRunId,
+        string? resultJson,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    ) =>
+        UpdateLeasedRunAsync(
+            workflowRunId,
+            leaseToken,
             SucceededStatus,
             resultJson,
             error: null,
@@ -155,6 +266,26 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
 
         return UpdateRunAsync(
             workflowRunId,
+            FailedStatus,
+            resultJson: null,
+            error,
+            completedAt: DateTimeOffset.UtcNow,
+            cancellationToken
+        );
+    }
+
+    public ValueTask<bool> RecordRunFailureAsync(
+        Guid workflowRunId,
+        string error,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(error);
+
+        return UpdateLeasedRunAsync(
+            workflowRunId,
+            leaseToken,
             FailedStatus,
             resultJson: null,
             error,
@@ -318,7 +449,10 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
                 updated_at = @updated_at,
                 completed_at = @completed_at,
                 result = @result,
-                error = @error
+                error = @error,
+                workflow_worker_id = null,
+                lease_token = null,
+                lease_expires_at = null
             where workflow_run_id = @workflow_run_id;
             """;
 
@@ -331,6 +465,46 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private async ValueTask<bool> UpdateLeasedRunAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        string status,
+        string? resultJson,
+        string? error,
+        DateTimeOffset? completedAt,
+        CancellationToken cancellationToken
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        const string sql = """
+            update pw_workflow_runs
+            set status = @status,
+                updated_at = @updated_at,
+                completed_at = @completed_at,
+                result = @result,
+                error = @error,
+                workflow_worker_id = null,
+                lease_token = null,
+                lease_expires_at = null
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+              and status = @running_status;
+            """;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("lease_token", leaseToken);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("status", status);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
+        command.Parameters.AddWithValue("result", NpgsqlDbType.Jsonb, (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
+
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
 
     private async ValueTask UpdateStepAsync(
@@ -371,6 +545,22 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
 
     private static DateTimeOffset? ReadNullableDateTimeOffset(NpgsqlDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
+
+    private static LeasedWorkflowRun ReadLeasedWorkflowRun(NpgsqlDataReader reader) =>
+        new(
+            reader.GetGuid(0),
+            reader.GetString(1),
+            ReadNullableString(reader, 3),
+            ReadRunStatus(reader.GetString(4)),
+            reader.GetFieldValue<DateTimeOffset>(5),
+            reader.GetFieldValue<DateTimeOffset>(6),
+            ReadNullableDateTimeOffset(reader, 7),
+            ReadNullableString(reader, 8),
+            ReadNullableString(reader, 9),
+            reader.GetString(10),
+            reader.GetFieldValue<DateTimeOffset>(11),
+            ReadNullableString(reader, 2)
+        );
 
     private static WorkflowStatus ReadRunStatus(string value) =>
         value switch

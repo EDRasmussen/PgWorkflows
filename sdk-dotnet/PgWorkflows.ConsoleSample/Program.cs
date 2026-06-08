@@ -15,10 +15,10 @@ if (string.IsNullOrWhiteSpace(connectionString))
 var builder = Host.CreateApplicationBuilder(args);
 builder.Services.AddPgWorkflows(pg =>
     pg.UsePostgres(connectionString)
-        .ConfigureWorker(options =>
+        .ConfigureWorkflowWorker(options =>
             options with
             {
-                WorkerId = "console-sample",
+                WorkerId = "console-sample-workflows",
                 BatchSize = 1,
                 PollInterval = TimeSpan.FromMilliseconds(100),
             }

@@ -3,13 +3,15 @@ namespace PgWorkflows.Workflows;
 public sealed class PgWorkflowClient(
     WorkflowRegistry registry,
     WorkflowRunner runner,
-    IServiceProvider serviceProvider
+    IServiceProvider serviceProvider,
+    bool executeWorkflowsInCaller = true
 ) : IPgWorkflowClient
 {
     private readonly WorkflowRegistry _registry = registry ?? throw new ArgumentNullException(nameof(registry));
     private readonly WorkflowRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
     private readonly IServiceProvider _serviceProvider =
         serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
+    private readonly bool _executeWorkflowsInCaller = executeWorkflowsInCaller;
 
     public async ValueTask<TOutput> ExecuteAsync<TWorkflow, TInput, TOutput>(
         TInput input,
@@ -47,7 +49,9 @@ public sealed class PgWorkflowClient(
 
         return new WorkflowHandle<TOutput>(
             workflowRunId,
-            (runId, ct) => _runner.ExecuteAsync<TOutput>(runId, definition, _serviceProvider, ct)
+            (runId, ct) => _executeWorkflowsInCaller
+                ? _runner.ExecuteAsync<TOutput>(runId, definition, _serviceProvider, ct)
+                : _runner.WaitForResultAsync<TOutput>(runId, ct)
         );
     }
 

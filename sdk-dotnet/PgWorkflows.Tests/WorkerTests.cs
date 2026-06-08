@@ -141,7 +141,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         services.AddSingleton<IActivityJobStore>(Store);
         services.AddSingleton(new GreetingPrefix("hello"));
         services.AddPgWorkflows(pg =>
-            pg.ConfigureWorker(options =>
+            pg.ConfigureActivityWorker(options =>
                     options with
                     {
                         WorkerId = "hosted-worker",

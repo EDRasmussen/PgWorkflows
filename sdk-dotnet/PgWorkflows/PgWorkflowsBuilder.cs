@@ -32,7 +32,9 @@ public sealed class PgWorkflowsBuilder
 
     internal bool EnsurePostgresSchemaOnStart { get; private set; }
 
-    internal ActivityWorkerOptions WorkerOptions { get; private set; } = new();
+    internal ActivityWorkerOptions ActivityWorkerOptions { get; private set; } = new();
+
+    internal WorkflowWorkerOptions WorkflowWorkerOptions { get; private set; } = new();
 
     public PgWorkflowsBuilder UsePostgres(
         string connectionString,
@@ -58,18 +60,29 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
-    public PgWorkflowsBuilder ConfigureWorker(
+    public PgWorkflowsBuilder ConfigureActivityWorker(
         Func<ActivityWorkerOptions, ActivityWorkerOptions> configure
     )
     {
         ArgumentNullException.ThrowIfNull(configure);
-        WorkerOptions = configure(WorkerOptions) ?? throw new InvalidOperationException(
-            "Worker options configuration must return an ActivityWorkerOptions instance."
+        ActivityWorkerOptions = configure(ActivityWorkerOptions) ?? throw new InvalidOperationException(
+            "Activity worker options configuration must return an ActivityWorkerOptions instance."
         );
         return this;
     }
 
-    public PgWorkflowsBuilder Register<TInput, TOutput>(
+    public PgWorkflowsBuilder ConfigureWorkflowWorker(
+        Func<WorkflowWorkerOptions, WorkflowWorkerOptions> configure
+    )
+    {
+        ArgumentNullException.ThrowIfNull(configure);
+        WorkflowWorkerOptions = configure(WorkflowWorkerOptions) ?? throw new InvalidOperationException(
+            "Workflow worker options configuration must return a WorkflowWorkerOptions instance."
+        );
+        return this;
+    }
+
+    public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, TOutput> handler,
         JsonSerializerOptions? jsonSerializerOptions = null
@@ -79,7 +92,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
-    public PgWorkflowsBuilder Register<TInput, TOutput>(
+    public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, ValueTask<TOutput>> handler,
         JsonSerializerOptions? jsonSerializerOptions = null
@@ -89,7 +102,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
-    public PgWorkflowsBuilder Register<TInput, TOutput>(
+    public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, CancellationToken, ValueTask<TOutput>> handler,
         JsonSerializerOptions? jsonSerializerOptions = null
@@ -99,7 +112,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
-    public PgWorkflowsBuilder Register<TInput, TOutput>(
+    public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<ActivityExecutionContext, TInput, CancellationToken, ValueTask<TOutput>> handler,
         JsonSerializerOptions? jsonSerializerOptions = null
@@ -338,7 +351,15 @@ public sealed class PgWorkflowsBuilder
             provider.GetRequiredService<PostgresWorkflowStore>()
         );
         Services.AddSingleton<WorkflowRunner>();
-        Services.AddSingleton<IPgWorkflowClient, PgWorkflowClient>();
+        Services.AddSingleton<WorkflowWorker>();
+        Services.AddSingleton<IPgWorkflowClient>(provider =>
+            new PgWorkflowClient(
+                provider.GetRequiredService<WorkflowRegistry>(),
+                provider.GetRequiredService<WorkflowRunner>(),
+                provider,
+                executeWorkflowsInCaller: false
+            )
+        );
         Services.AddSingleton<PostgresActivityJobWakeup>();
         Services.AddSingleton<IActivityJobWakeup>(provider =>
             provider.GetRequiredService<PostgresActivityJobWakeup>()

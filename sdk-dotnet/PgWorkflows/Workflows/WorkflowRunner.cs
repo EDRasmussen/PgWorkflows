@@ -40,20 +40,82 @@ public sealed class WorkflowRunner(
         WorkflowDefinition workflow,
         IServiceProvider serviceProvider,
         CancellationToken cancellationToken = default
+    ) =>
+        Deserialize<TOutput>(
+            await ExecuteCoreAsync(
+                workflowRunId,
+                workflow,
+                serviceProvider,
+                leaseToken: null,
+                cancellationToken
+            )
+        );
+
+    internal async ValueTask ExecuteLeasedAsync(
+        Guid workflowRunId,
+        WorkflowDefinition workflow,
+        IServiceProvider serviceProvider,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    ) =>
+        await ExecuteCoreAsync(workflowRunId, workflow, serviceProvider, leaseToken, cancellationToken);
+
+    internal async ValueTask<TOutput> WaitForResultAsync<TOutput>(
+        Guid workflowRunId,
+        CancellationToken cancellationToken = default
+    )
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var run = await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
+                ?? throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
+
+            if (run.Status == WorkflowStatus.Succeeded)
+            {
+                return Deserialize<TOutput>(run.ResultJson);
+            }
+
+            if (run.Status == WorkflowStatus.Failed)
+            {
+                throw new InvalidOperationException(
+                    $"Workflow run '{workflowRunId}' failed: {run.Error ?? "Unknown error."}"
+                );
+            }
+
+            await Task.Delay(ActivityPollInterval, cancellationToken);
+        }
+    }
+
+    private async ValueTask<string?> ExecuteCoreAsync(
+        Guid workflowRunId,
+        WorkflowDefinition workflow,
+        IServiceProvider serviceProvider,
+        string? leaseToken,
+        CancellationToken cancellationToken
     )
     {
         ArgumentNullException.ThrowIfNull(workflow);
         ArgumentNullException.ThrowIfNull(serviceProvider);
+
+        if (leaseToken is not null)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+        }
 
         var run = await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
             ?? throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
 
         if (run.Status == WorkflowStatus.Succeeded)
         {
-            return Deserialize<TOutput>(run.ResultJson);
+            return run.ResultJson;
         }
 
-        await _workflowStore.MarkRunRunningAsync(workflowRunId, cancellationToken);
+        if (leaseToken is null)
+        {
+            await _workflowStore.MarkRunRunningAsync(workflowRunId, cancellationToken);
+        }
 
         var input = run.InputJson is null
             ? null
@@ -75,8 +137,21 @@ public sealed class WorkflowRunner(
                 cancellationToken
             );
             var resultJson = JsonSerializer.Serialize(result, workflow.OutputType, _jsonSerializerOptions);
-            await _workflowStore.RecordRunSuccessAsync(workflowRunId, resultJson, cancellationToken);
-            return Deserialize<TOutput>(resultJson);
+            if (leaseToken is null)
+            {
+                await _workflowStore.RecordRunSuccessAsync(workflowRunId, resultJson, cancellationToken);
+            }
+            else
+            {
+                await _workflowStore.RecordRunSuccessAsync(
+                    workflowRunId,
+                    resultJson,
+                    leaseToken,
+                    CancellationToken.None
+                );
+            }
+
+            return resultJson;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -84,7 +159,25 @@ public sealed class WorkflowRunner(
         }
         catch (Exception ex)
         {
-            await _workflowStore.RecordRunFailureAsync(workflowRunId, ex.ToString(), CancellationToken.None);
+            if (leaseToken is null)
+            {
+                await _workflowStore.RecordRunFailureAsync(workflowRunId, ex.ToString(), CancellationToken.None);
+            }
+            else
+            {
+                var recorded = await _workflowStore.RecordRunFailureAsync(
+                    workflowRunId,
+                    ex.ToString(),
+                    leaseToken,
+                    CancellationToken.None
+                );
+
+                if (recorded)
+                {
+                    return null;
+                }
+            }
+
             throw;
         }
     }
