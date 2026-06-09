@@ -6,8 +6,8 @@ using Npgsql;
 using PgWorkflows.Activities;
 using PgWorkflows.Persistence;
 using PgWorkflows.Persistence.Postgres;
-using PgWorkflows.Workflows;
 using PgWorkflows.Workers;
+using PgWorkflows.Workflows;
 
 namespace PgWorkflows;
 
@@ -25,7 +25,8 @@ public sealed class PgWorkflowsBuilder
     {
         Services = services ?? throw new ArgumentNullException(nameof(services));
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-        _workflowRegistry = workflowRegistry ?? throw new ArgumentNullException(nameof(workflowRegistry));
+        _workflowRegistry =
+            workflowRegistry ?? throw new ArgumentNullException(nameof(workflowRegistry));
     }
 
     public IServiceCollection Services { get; }
@@ -36,10 +37,7 @@ public sealed class PgWorkflowsBuilder
 
     internal WorkflowWorkerOptions WorkflowWorkerOptions { get; private set; } = new();
 
-    public PgWorkflowsBuilder UsePostgres(
-        string connectionString,
-        bool ensureSchemaOnStart = true
-    )
+    public PgWorkflowsBuilder UsePostgres(string connectionString, bool ensureSchemaOnStart = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
@@ -65,9 +63,11 @@ public sealed class PgWorkflowsBuilder
     )
     {
         ArgumentNullException.ThrowIfNull(configure);
-        ActivityWorkerOptions = configure(ActivityWorkerOptions) ?? throw new InvalidOperationException(
-            "Activity worker options configuration must return an ActivityWorkerOptions instance."
-        );
+        ActivityWorkerOptions =
+            configure(ActivityWorkerOptions)
+            ?? throw new InvalidOperationException(
+                "Activity worker options configuration must return an ActivityWorkerOptions instance."
+            );
         return this;
     }
 
@@ -76,9 +76,11 @@ public sealed class PgWorkflowsBuilder
     )
     {
         ArgumentNullException.ThrowIfNull(configure);
-        WorkflowWorkerOptions = configure(WorkflowWorkerOptions) ?? throw new InvalidOperationException(
-            "Workflow worker options configuration must return a WorkflowWorkerOptions instance."
-        );
+        WorkflowWorkerOptions =
+            configure(WorkflowWorkerOptions)
+            ?? throw new InvalidOperationException(
+                "Workflow worker options configuration must return a WorkflowWorkerOptions instance."
+            );
         return this;
     }
 
@@ -235,18 +237,13 @@ public sealed class PgWorkflowsBuilder
             );
         }
 
-        if (cancellationTokens.Length == 1 && parameters[^1].ParameterType != typeof(CancellationToken))
+        if (
+            cancellationTokens.Length == 1
+            && parameters[^1].ParameterType != typeof(CancellationToken)
+        )
         {
             throw new InvalidOperationException(
                 $"Activity method '{displayName}' must put CancellationToken last."
-            );
-        }
-
-        var inputParameterCount = parameters.Length - cancellationTokens.Length;
-        if (inputParameterCount > 1)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{displayName}' must accept at most one input parameter before CancellationToken."
             );
         }
     }
@@ -259,20 +256,34 @@ public sealed class PgWorkflowsBuilder
         where TActivities : class
     {
         var parameters = method.GetParameters();
-        var hasCancellationToken = parameters.LastOrDefault()?.ParameterType == typeof(CancellationToken);
+        var hasCancellationToken =
+            parameters.LastOrDefault()?.ParameterType == typeof(CancellationToken);
         var inputParameterCount = hasCancellationToken ? parameters.Length - 1 : parameters.Length;
-        var inputType = inputParameterCount == 1 ? parameters[0].ParameterType : null;
 
         return async (_, inputJson, cancellationToken) =>
         {
             var activity = ActivatorUtilities.GetServiceOrCreateInstance<TActivities>(provider);
             var args = new object?[parameters.Length];
 
-            if (inputType is not null)
+            if (inputParameterCount == 1)
             {
+                var inputType = parameters[0].ParameterType;
                 args[0] = inputJson is null
                     ? GetDefault(inputType)
                     : JsonSerializer.Deserialize(inputJson, inputType, jsonSerializerOptions);
+            }
+            else if (inputParameterCount > 1)
+            {
+                using var document = inputJson is null ? null : JsonDocument.Parse(inputJson);
+                for (var index = 0; index < inputParameterCount; index++)
+                {
+                    var parameter = parameters[index];
+                    args[index] =
+                        document is not null
+                        && document.RootElement.TryGetProperty(parameter.Name!, out var property)
+                            ? property.Deserialize(parameter.ParameterType, jsonSerializerOptions)
+                            : GetDefault(parameter.ParameterType);
+                }
             }
 
             if (hasCancellationToken)
@@ -317,10 +328,15 @@ public sealed class PgWorkflowsBuilder
             return null;
         }
 
-        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>))
+        if (
+            returnType.IsGenericType
+            && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>)
+        )
         {
-            var task = (Task)returnType.GetMethod(nameof(ValueTask.AsTask), Type.EmptyTypes)!
-                .Invoke(returned, null)!;
+            var task = (Task)
+                returnType
+                    .GetMethod(nameof(ValueTask.AsTask), Type.EmptyTypes)!
+                    .Invoke(returned, null)!;
             await task;
             return task.GetType().GetProperty(nameof(Task<object>.Result))!.GetValue(task);
         }
@@ -352,13 +368,11 @@ public sealed class PgWorkflowsBuilder
         );
         Services.AddSingleton<WorkflowRunner>();
         Services.AddSingleton<WorkflowWorker>();
-        Services.AddSingleton<IPgWorkflowClient>(provider =>
-            new PgWorkflowClient(
-                provider.GetRequiredService<WorkflowRegistry>(),
-                provider.GetRequiredService<WorkflowRunner>(),
-                provider,
-                executeWorkflowsInCaller: false
-            )
-        );
+        Services.AddSingleton<IPgWorkflowClient>(provider => new PgWorkflowClient(
+            provider.GetRequiredService<WorkflowRegistry>(),
+            provider.GetRequiredService<WorkflowRunner>(),
+            provider,
+            executeWorkflowsInCaller: false
+        ));
     }
 }

@@ -1,6 +1,7 @@
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using PgWorkflows.Activities;
 
 namespace PgWorkflows.Workflows;
@@ -10,38 +11,32 @@ internal sealed record WorkflowActivityCall(string ActivityName, string? InputJs
     public static WorkflowActivityCall FromExpression<TActivities>(
         Expression<Action<TActivities>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     public static WorkflowActivityCall FromExpression<TActivities>(
         Expression<Func<TActivities, Task>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     public static WorkflowActivityCall FromExpression<TActivities>(
         Expression<Func<TActivities, ValueTask>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     public static WorkflowActivityCall FromExpression<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     public static WorkflowActivityCall FromExpression<TActivities, TOutput>(
         Expression<Func<TActivities, Task<TOutput>>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     public static WorkflowActivityCall FromExpression<TActivities, TOutput>(
         Expression<Func<TActivities, ValueTask<TOutput>>> expression,
         JsonSerializerOptions? jsonSerializerOptions
-    ) =>
-        FromExpressionBody(expression.Body, jsonSerializerOptions);
+    ) => FromExpressionBody(expression.Body, jsonSerializerOptions);
 
     private static WorkflowActivityCall FromExpressionBody(
         Expression body,
@@ -77,25 +72,40 @@ internal sealed record WorkflowActivityCall(string ActivityName, string? InputJs
     {
         var parameters = call.Method.GetParameters();
         var inputArguments = call
-            .Arguments.Select((argument, index) => new { Argument = argument, Parameter = parameters[index] })
+            .Arguments.Select(
+                (argument, index) => new { Argument = argument, Parameter = parameters[index] }
+            )
             .Where(item => item.Parameter.ParameterType != typeof(CancellationToken))
             .ToArray();
-
-        if (inputArguments.Length > 1)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{call.Method.DeclaringType?.FullName}.{call.Method.Name}' must accept at most one input argument before CancellationToken."
-            );
-        }
 
         if (inputArguments.Length == 0)
         {
             return null;
         }
 
-        var input = inputArguments[0];
-        var value = Evaluate(input.Argument);
-        return JsonSerializer.Serialize(value, input.Parameter.ParameterType, jsonSerializerOptions);
+        if (inputArguments.Length == 1)
+        {
+            var input = inputArguments[0];
+            var value = Evaluate(input.Argument);
+            return JsonSerializer.Serialize(
+                value,
+                input.Parameter.ParameterType,
+                jsonSerializerOptions
+            );
+        }
+
+        var arguments = new JsonObject();
+        foreach (var item in inputArguments)
+        {
+            var value = Evaluate(item.Argument);
+            arguments[item.Parameter.Name!] = JsonSerializer.SerializeToNode(
+                value,
+                item.Parameter.ParameterType,
+                jsonSerializerOptions
+            );
+        }
+
+        return arguments.ToJsonString(jsonSerializerOptions);
     }
 
     private static object? Evaluate(Expression expression)

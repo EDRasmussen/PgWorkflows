@@ -71,23 +71,11 @@ internal sealed record GreetingWorkflowInput(string Name, int GoodbyeId);
 
 internal sealed record CheckoutInput(string UserName, decimal Amount);
 
-internal sealed record ReserveInventoryInput(string UserName, string ItemName);
-
 internal sealed record InventoryReservation(string ReservationId, string UserName, string ItemName);
-
-internal sealed record ReleaseInventoryInput(
-    string ReservationId,
-    string UserName,
-    string ItemName
-);
 
 internal sealed record ChargePaymentInput(string UserName, decimal Amount);
 
 internal sealed record PaymentReceipt(string PaymentId, string UserName, decimal Amount);
-
-internal sealed record RefundPaymentInput(string PaymentId, string UserName, decimal Amount);
-
-internal sealed record CreateShipmentInput(string UserName, string ItemName, string ReservationId);
 
 [Workflow("console-sample-workflow")]
 internal sealed class GreetingWorkflow
@@ -123,41 +111,34 @@ internal sealed class CheckoutWorkflow
 
         var reservation = await ctx.Activity(
             (CheckoutActivities activities) =>
-                activities.ReserveInventory(new ReserveInventoryInput(input.UserName, itemName)),
+                activities.ReserveInventory(input.UserName, itemName),
             cancellationToken
         );
 
         await ctx.OnFailure(
             (CheckoutActivities activities) =>
                 activities.ReleaseInventory(
-                    new ReleaseInventoryInput(
-                        reservation.ReservationId,
-                        reservation.UserName,
-                        reservation.ItemName
-                    )
+                    reservation.ReservationId,
+                    reservation.UserName,
+                    reservation.ItemName
                 ),
             cancellationToken
         );
 
         var payment = await ctx.Activity(
             (CheckoutActivities activities) =>
-                activities.ChargePayment(new ChargePaymentInput(input.UserName, input.Amount)),
+                activities.ChargePayment(input.UserName, input.Amount),
             cancellationToken
         );
 
         await ctx.OnFailure(
             (CheckoutActivities activities) =>
-                activities.RefundPayment(
-                    new RefundPaymentInput(payment.PaymentId, payment.UserName, payment.Amount)
-                ),
+                activities.RefundPayment(payment.Amount, payment.UserName, payment.PaymentId),
             cancellationToken
         );
 
         await ctx.Activity(
-            (CheckoutActivities activities) =>
-                activities.CreateShipment(
-                    new CreateShipmentInput(input.UserName, itemName, reservation.ReservationId)
-                ),
+            (CheckoutActivities activities) => activities.CreateShipment(input.UserName, itemName),
             cancellationToken
         );
 
@@ -178,37 +159,33 @@ internal sealed class HelloActivities
 internal sealed class CheckoutActivities
 {
     [Activity("reserve-inventory")]
-    public InventoryReservation ReserveInventory(ReserveInventoryInput input)
+    public InventoryReservation ReserveInventory(string userName, string itemName)
     {
         var reservationId = $"res-{Guid.NewGuid():N}";
-        Console.WriteLine($"Reserved {input.ItemName} for {input.UserName} ({reservationId}).");
-        return new InventoryReservation(reservationId, input.UserName, input.ItemName);
+        Console.WriteLine($"Reserved {itemName} for {userName} ({reservationId}).");
+        return new InventoryReservation(reservationId, userName, itemName);
     }
 
     [Activity("release-inventory")]
-    public void ReleaseInventory(ReleaseInventoryInput input) =>
-        Console.WriteLine(
-            $"Released {input.ItemName} reservation for {input.UserName} ({input.ReservationId})."
-        );
+    public void ReleaseInventory(string reservationId, string userName, string itemName) =>
+        Console.WriteLine($"Released {itemName} reservation for {userName} ({reservationId}).");
 
     [Activity("charge-payment")]
-    public PaymentReceipt ChargePayment(ChargePaymentInput input)
+    public PaymentReceipt ChargePayment(string userName, decimal amount)
     {
         var paymentId = $"pay-{Guid.NewGuid():N}";
-        Console.WriteLine($"{input.UserName} paid ${input.Amount:0.##}! ({paymentId})");
-        return new PaymentReceipt(paymentId, input.UserName, input.Amount);
+        Console.WriteLine($"{userName} paid ${amount:0.##}! ({paymentId})");
+        return new PaymentReceipt(paymentId, userName, amount);
     }
 
     [Activity("refund-payment")]
-    public void RefundPayment(RefundPaymentInput input) =>
-        Console.WriteLine(
-            $"Refunded ${input.Amount:0.##} to {input.UserName} ({input.PaymentId})."
-        );
+    public void RefundPayment(decimal amount, string userName, string paymentId) =>
+        Console.WriteLine($"Refunded ${amount:0.##} to {userName} ({paymentId}).");
 
     [Activity("create-shipment")]
-    public string CreateShipment(CreateShipmentInput input)
+    public string CreateShipment(string userName, string itemName)
     {
-        Console.WriteLine($"Creating shipment for {input.UserName}'s {input.ItemName}...");
+        Console.WriteLine($"Creating shipment for {userName}'s {itemName}...");
         throw new InvalidOperationException("Warehouse label printer is offline.");
     }
 }

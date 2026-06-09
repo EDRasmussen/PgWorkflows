@@ -7,6 +7,7 @@ using PgWorkflows.Jobs;
 using PgWorkflows.Persistence;
 using PgWorkflows.Persistence.Postgres;
 using PgWorkflows.Workers;
+using PgWorkflows.Workflows;
 using Xunit;
 
 namespace PgWorkflows.Tests;
@@ -172,6 +173,38 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         {
             await hostedService.StopAsync(CancellationToken.None);
         }
+    }
+
+    [Fact]
+    public async Task Multi_parameter_activity_round_trips_named_object_input()
+    {
+        var services = new ServiceCollection();
+        services.AddSingleton<IActivityJobStore>(Store);
+        services.AddPgWorkflows(pg => pg.AddActivities<MultiParamActivities>());
+
+        await using var provider = services.BuildServiceProvider();
+        // Resolving the hosted service applies the deferred attributed-activity registrations
+        // without starting background polling, leaving us in control of the worker.
+        _ = provider.GetServices<IHostedService>().ToArray();
+        var registry = provider.GetRequiredService<ActivityRegistry>();
+
+        // Producer: a workflow expression with multiple arguments serialises them as a
+        // JSON object keyed by parameter name (not a positional array or a wrapper record).
+        var call = WorkflowActivityCall.FromExpression(
+            (MultiParamActivities a) => a.Reserve("alice", "widget", 3),
+            jsonSerializerOptions: null
+        );
+        Assert.Contains("\"userName\"", call.InputJson);
+        Assert.Contains("\"itemName\"", call.InputJson);
+        Assert.Contains("\"quantity\"", call.InputJson);
+
+        // Consumer: the worker maps the named object back onto the individual parameters.
+        var jobId = await Store.EnqueueAsync(call.ActivityName, call.InputJson);
+        var worker = new ActivityWorker(registry, Store, Options("multi-param-worker"));
+        var job = await RunUntilTerminalAsync(worker, jobId, TimeSpan.FromSeconds(10));
+
+        Assert.True(job.Status == JobStatus.Succeeded, job.Error);
+        Assert.Equal("alice reserved 3 widget", job.GetResult<string>());
     }
 
     [Fact]
@@ -548,6 +581,13 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         [Activity("uppercase")]
         public GreetingOutput Uppercase(GreetingInput input) =>
             new(input.Name.ToUpperInvariant());
+    }
+
+    private sealed class MultiParamActivities
+    {
+        [Activity("reserve-multi")]
+        public string Reserve(string userName, string itemName, int quantity) =>
+            $"{userName} reserved {quantity} {itemName}";
     }
 
     private sealed record GreetingPrefix(string Value);
