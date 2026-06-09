@@ -42,6 +42,21 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    /// <summary>
+    /// Parks a leased run until <paramref name="fireAt"/> by reusing the pending/visible_at
+    /// machinery, releasing the lease without counting the resume as a failed attempt. The timer's
+    /// deadline is persisted in the same transaction so the park and the durable deadline are
+    /// atomic. Returns false when the lease was lost (the caller should abandon, not treat the run
+    /// as parked); in that case nothing is written.
+    /// </summary>
+    ValueTask<bool> RecordRunSleepingAsync(
+        Guid workflowRunId,
+        int timerSequence,
+        DateTimeOffset fireAt,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask RecordRunFailureAsync(
         Guid workflowRunId,
         string error,
@@ -61,6 +76,18 @@ internal interface IWorkflowStore
         string leaseToken,
         bool retryable,
         DateTimeOffset? nextVisibleAt,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
+    /// Returns the durable fire time recorded for a workflow timer, or null when the timer has
+    /// not been created yet (first encounter). The deadline is persisted atomically with the park
+    /// in <see cref="RecordRunSleepingAsync"/>, which keeps <c>ctx.Sleep</c> deterministic across
+    /// replays.
+    /// </summary>
+    ValueTask<DateTimeOffset?> GetTimerAsync(
+        Guid workflowRunId,
+        int timerSequence,
         CancellationToken cancellationToken = default
     );
 

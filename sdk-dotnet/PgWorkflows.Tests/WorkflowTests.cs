@@ -516,6 +516,179 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         Assert.Equal("done world", System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!));
     }
 
+    [Fact]
+    public async Task Hosted_workflow_worker_parks_sleeping_run_and_resumes_after_timer()
+    {
+        var activities = new SleepActivities();
+        var registry = new ActivityRegistry();
+        registry.Register("wf-sleep-first", (string value) => activities.First(value));
+        registry.Register("wf-sleep-second", (string value) => activities.Second(value));
+        var activityWorker = new ActivityWorker(registry, Store, Options("activity-worker"));
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SleepWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<SleepWorkflow, string, string>("value");
+
+        using var activityWorkerCts = new CancellationTokenSource();
+        var activityWorkerRun = activityWorker.RunAsync(activityWorkerCts.Token);
+
+        try
+        {
+            // First lease: runs the pre-sleep activity, hits ctx.Sleep, and parks the run. The
+            // sleep is long (30s) so the "still parked" checks below cannot race a real timer.
+            Assert.Equal(1, await worker.RunOnceAsync());
+
+            var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+            Assert.Equal(WorkflowStatus.Pending, parked!.Status);
+            Assert.True(parked.VisibleAt > DateTimeOffset.UtcNow);
+            Assert.Equal(1, activities.FirstExecutions);
+            Assert.Equal(0, activities.SecondExecutions);
+
+            // The pre-sleep step is durably memoized (this is what makes the resume not re-run it).
+            var firstStepAfterPark = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
+            Assert.Equal(WorkflowStepStatus.Succeeded, firstStepAfterPark!.Status);
+
+            var fireAt = await WorkflowStore.GetTimerAsync(handle.WorkflowRunId, 0);
+            Assert.NotNull(fireAt);
+            Assert.Equal(parked.VisibleAt, fireAt!.Value);
+
+            // Still parked: the timer has not fired, so there is nothing to lease.
+            Assert.Equal(0, await worker.RunOnceAsync());
+
+            // Fire the timer deterministically (no wall-clock wait): move both the timer's fire_at
+            // and the run's visible_at into the past, simulating the deadline elapsing.
+            await FireWorkflowTimerAsync(handle.WorkflowRunId, 0);
+
+            // Resume: replays the cached pre-sleep step, passes the elapsed timer, runs the rest.
+            Assert.Equal(1, await worker.RunOnceAsync());
+
+            var result = await handle.GetResultAsync();
+            Assert.Equal("second:first:value", result);
+
+            var succeeded = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+            Assert.Equal(WorkflowStatus.Succeeded, succeeded!.Status);
+            // End-to-end exactly-once: the pre-sleep activity body ran a single time across the
+            // park/resume (the step memoization above is the mechanism that guarantees it).
+            Assert.Equal(1, activities.FirstExecutions);
+            Assert.Equal(1, activities.SecondExecutions);
+        }
+        finally
+        {
+            activityWorkerCts.Cancel();
+            await SwallowCancellation(activityWorkerRun);
+        }
+    }
+
+    [Fact]
+    public async Task Hosted_workflow_worker_sleep_does_not_consume_retry_budget()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SleepThenFailWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions() with
+            {
+                MaxAttempts = 2,
+                GetRetryDelay = _ => TimeSpan.Zero,
+            }
+        );
+        SleepThenFailWorkflow.Reset();
+        var handle = await client.StartAsync<SleepThenFailWorkflow, string, string>("value");
+
+        // First lease parks the run on the timer (this must not spend an attempt).
+        Assert.Equal(1, await worker.RunOnceAsync());
+        var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, parked!.Status);
+
+        // Fire the timer deterministically, then resume.
+        await FireWorkflowTimerAsync(handle.WorkflowRunId, 0);
+
+        // Resume: the post-sleep body fails. Because the sleep gave its attempt back, attempt 1 of 2
+        // is the real failure, so the run is still retryable rather than terminal. (Remove the
+        // greatest(attempt-1,0) decrement and this lands at attempt 2 -> terminal, failing here.)
+        Assert.Equal(1, await worker.RunOnceAsync());
+        var retrying = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, retrying!.Status);
+        Assert.Contains("post-sleep transient failure", retrying.Error);
+
+        // Final attempt succeeds (the fired timer stays elapsed, so it does not re-park).
+        Assert.Equal(1, await worker.RunOnceAsync());
+        var result = await handle.GetResultAsync();
+        Assert.Equal("value", result);
+        var succeeded = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Succeeded, succeeded!.Status);
+    }
+
+    [Fact]
+    public async Task Hosted_workflow_worker_fails_loudly_when_sleep_is_swallowed()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SwallowsSleepWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<SwallowsSleepWorkflow, string, string>("value");
+
+        // The workflow catches the park exception and returns normally; the runner must fail the
+        // run loudly rather than silently record success and skip the durable timer.
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Failed, run!.Status);
+        Assert.Contains("swallowed", run.Error);
+    }
+
+    private async Task FireWorkflowTimerAsync(Guid workflowRunId, int timerSequence)
+    {
+        var past = DateTimeOffset.UtcNow.Subtract(TimeSpan.FromSeconds(1));
+        await using var command = DataSource.CreateCommand(
+            """
+            update pw_workflow_timers
+            set fire_at = @past
+            where workflow_run_id = @workflow_run_id and timer_seq = @timer_seq;
+
+            update pw_workflow_runs
+            set visible_at = @past
+            where workflow_run_id = @workflow_run_id;
+            """
+        );
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("timer_seq", timerSequence);
+        command.Parameters.AddWithValue("past", past);
+        await command.ExecuteNonQueryAsync();
+    }
+
     private async Task<WorkflowRun> SingleWorkflowRunAsync()
     {
         await using var command = DataSource.CreateCommand("select workflow_run_id from pw_workflow_runs;");
@@ -751,6 +924,103 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             }
 
             return value;
+        }
+    }
+
+    private sealed class SleepActivities
+    {
+        public int FirstExecutions => Volatile.Read(ref _firstExecutions);
+
+        public int SecondExecutions => Volatile.Read(ref _secondExecutions);
+
+        private int _firstExecutions;
+        private int _secondExecutions;
+
+        [Activity("wf-sleep-first")]
+        public string First(string value)
+        {
+            Interlocked.Increment(ref _firstExecutions);
+            return $"first:{value}";
+        }
+
+        [Activity("wf-sleep-second")]
+        public string Second(string value)
+        {
+            Interlocked.Increment(ref _secondExecutions);
+            return $"second:{value}";
+        }
+    }
+
+    [Workflow]
+    public sealed class SleepWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            var first = await ctx.Activity(
+                (SleepActivities a) => a.First(input),
+                cancellationToken
+            );
+
+            // Long sleep: the test fires the timer deterministically rather than waiting it out.
+            await ctx.Sleep(TimeSpan.FromSeconds(30), cancellationToken);
+
+            return await ctx.Activity(
+                (SleepActivities a) => a.Second(first),
+                cancellationToken
+            );
+        }
+    }
+
+    [Workflow]
+    public sealed class SleepThenFailWorkflow
+    {
+        private static int s_invocations;
+
+        public static void Reset() => Volatile.Write(ref s_invocations, 0);
+
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            await ctx.Sleep(TimeSpan.FromSeconds(30), cancellationToken);
+
+            if (Interlocked.Increment(ref s_invocations) == 1)
+            {
+                throw new InvalidOperationException("post-sleep transient failure");
+            }
+
+            return input;
+        }
+    }
+
+    [Workflow]
+    public sealed class SwallowsSleepWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            try
+            {
+                await ctx.Sleep(TimeSpan.FromSeconds(30), cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Intentionally swallow the park exception to exercise the fail-loud guard.
+            }
+
+            return input;
         }
     }
 

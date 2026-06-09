@@ -10,7 +10,8 @@ internal sealed class WorkflowContext(
     IWorkflowStore workflowStore,
     IActivityJobStore activityStore,
     JsonSerializerOptions? jsonSerializerOptions,
-    TimeSpan activityPollInterval
+    TimeSpan activityPollInterval,
+    bool canSleep
 ) : IWorkflowContext
 {
     private readonly IWorkflowStore _workflowStore =
@@ -19,10 +20,57 @@ internal sealed class WorkflowContext(
         activityStore ?? throw new ArgumentNullException(nameof(activityStore));
     private readonly JsonSerializerOptions? _jsonSerializerOptions = jsonSerializerOptions;
     private readonly TimeSpan _activityPollInterval = activityPollInterval;
+    private readonly bool _canSleep = canSleep;
     private int _nextStepSequence;
     private int _nextFailureHookSequence;
+    private int _nextTimerSequence;
 
     public Guid WorkflowRunId { get; } = workflowRunId;
+
+    /// <summary>
+    /// True once <see cref="Sleep"/> has decided to park (it has thrown
+    /// <see cref="WorkflowSleepException"/>). If the workflow nevertheless completes normally, the
+    /// park exception was swallowed by user code and the runner must fail loudly instead of
+    /// recording success.
+    /// </summary>
+    internal bool ParkRequested { get; private set; }
+
+    public async ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default)
+    {
+        if (!_canSleep)
+        {
+            throw new NotSupportedException(
+                "ctx.Sleep is only supported when the workflow is executed by the workflow worker, "
+                    + "not when executed inline in the caller."
+            );
+        }
+
+        var timerSequence = _nextTimerSequence++;
+
+        // Read-only: the deadline is persisted atomically with the park (RecordRunSleepingAsync),
+        // so a first encounter computes the deadline and throws, and the runner durably writes it.
+        var fireAt = await _workflowStore.GetTimerAsync(
+            WorkflowRunId,
+            timerSequence,
+            cancellationToken
+        );
+
+        if (fireAt is null)
+        {
+            var delay = duration > TimeSpan.Zero ? duration : TimeSpan.Zero;
+            fireAt = DateTimeOffset.UtcNow.Add(delay);
+        }
+
+        if (DateTimeOffset.UtcNow >= fireAt.Value)
+        {
+            // Already elapsed (including zero/negative durations): continue without parking or
+            // persisting, so no orphan timer row is created.
+            return;
+        }
+
+        ParkRequested = true;
+        throw new WorkflowSleepException(timerSequence, fireAt.Value);
+    }
 
     public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall

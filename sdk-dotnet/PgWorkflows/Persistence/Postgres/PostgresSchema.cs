@@ -115,5 +115,13 @@ public static class PostgresSchema
         create unique index if not exists ux_pw_workflow_failure_hooks_activity_job
             on pw_workflow_failure_hooks (activity_job_id)
             where activity_job_id is not null;
+
+        create table if not exists pw_workflow_timers (
+            workflow_run_id uuid not null references pw_workflow_runs(workflow_run_id) on delete cascade,
+            timer_seq integer not null,
+            fire_at timestamptz not null,
+            created_at timestamptz not null,
+            primary key (workflow_run_id, timer_seq)
+        );
         """;
 }

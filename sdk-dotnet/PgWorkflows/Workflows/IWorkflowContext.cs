@@ -6,6 +6,25 @@ public interface IWorkflowContext
 {
     Guid WorkflowRunId { get; }
 
+    /// <summary>
+    /// Durably sleeps for <paramref name="duration"/>. The run is parked (its <c>visible_at</c> is
+    /// pushed into the future and the lease released) and resumed by the workflow worker once the
+    /// timer fires, surviving process restarts. The deadline is persisted on first encounter so it
+    /// stays stable across replays.
+    /// </summary>
+    /// <remarks>
+    /// Parking is implemented by throwing an internal control-flow exception, so do not wrap
+    /// <c>Sleep</c> in a broad <c>catch</c> — doing so swallows the park. If that happens the run
+    /// fails loudly rather than silently skipping the timer.
+    /// <para>
+    /// Sleeping requires the hosted workflow worker (which <c>AddPgWorkflows</c> configures by
+    /// default). It must not be driven by an inline client (a <c>PgWorkflowClient</c> with
+    /// <c>executeWorkflowsInCaller: true</c>); calling <c>Sleep</c> on such a run throws
+    /// <see cref="NotSupportedException"/>.
+    /// </para>
+    /// </remarks>
+    ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default);
+
     WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall
     );

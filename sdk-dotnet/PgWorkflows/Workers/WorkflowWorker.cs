@@ -18,8 +18,10 @@ internal sealed class WorkflowWorker(
 
     private readonly WorkflowRegistry _registry =
         registry ?? throw new ArgumentNullException(nameof(registry));
-    private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));
-    private readonly WorkflowRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+    private readonly IWorkflowStore _store =
+        store ?? throw new ArgumentNullException(nameof(store));
+    private readonly WorkflowRunner _runner =
+        runner ?? throw new ArgumentNullException(nameof(runner));
     private readonly IServiceProvider _serviceProvider =
         serviceProvider ?? throw new ArgumentNullException(nameof(serviceProvider));
     private readonly WorkflowWorkerOptions _options = options ?? new WorkflowWorkerOptions();
@@ -108,13 +110,8 @@ internal sealed class WorkflowWorker(
                 _logger?.LogInformation("Workflow worker {WorkerId} stopped.", _options.WorkerId);
                 return;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OutOfMemoryException)
             {
-                if (ex is OutOfMemoryException)
-                {
-                    throw;
-                }
-
                 consecutiveFailures++;
                 var delay = BackoffDelay(consecutiveFailures);
                 _logger?.LogWarning(
@@ -130,7 +127,10 @@ internal sealed class WorkflowWorker(
                 }
                 catch (OperationCanceledException)
                 {
-                    _logger?.LogInformation("Workflow worker {WorkerId} stopped.", _options.WorkerId);
+                    _logger?.LogInformation(
+                        "Workflow worker {WorkerId} stopped.",
+                        _options.WorkerId
+                    );
                     return;
                 }
             }
@@ -231,7 +231,8 @@ internal sealed class WorkflowWorker(
             }
             catch (InvalidOperationException hookEx)
             {
-                error = $"{error}{Environment.NewLine}Failure hook error:{Environment.NewLine}{hookEx}";
+                error =
+                    $"{error}{Environment.NewLine}Failure hook error:{Environment.NewLine}{hookEx}";
             }
         }
 

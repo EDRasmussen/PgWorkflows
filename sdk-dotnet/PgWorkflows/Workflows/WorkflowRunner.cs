@@ -59,7 +59,13 @@ internal sealed class WorkflowRunner(
         string leaseToken,
         CancellationToken cancellationToken = default
     ) =>
-        await ExecuteCoreAsync(workflowRunId, workflow, serviceProvider, leaseToken, cancellationToken);
+        await ExecuteCoreAsync(
+            workflowRunId,
+            workflow,
+            serviceProvider,
+            leaseToken,
+            cancellationToken
+        );
 
     internal async ValueTask RunFailureHooksAsync(
         Guid workflowRunId,
@@ -82,8 +88,11 @@ internal sealed class WorkflowRunner(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var run = await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
-                ?? throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
+            var run =
+                await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
+                ?? throw new InvalidOperationException(
+                    $"Workflow run '{workflowRunId}' was not found."
+                );
 
             if (run.Status == WorkflowStatus.Succeeded)
             {
@@ -117,8 +126,11 @@ internal sealed class WorkflowRunner(
             ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
         }
 
-        var run = await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
-            ?? throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
+        var run =
+            await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"Workflow run '{workflowRunId}' was not found."
+            );
 
         if (run.Status == WorkflowStatus.Succeeded)
         {
@@ -138,7 +150,8 @@ internal sealed class WorkflowRunner(
             _workflowStore,
             _activityStore,
             _jsonSerializerOptions,
-            ActivityPollInterval
+            ActivityPollInterval,
+            canSleep: leaseToken is not null
         );
 
         try
@@ -149,10 +162,31 @@ internal sealed class WorkflowRunner(
                 input,
                 cancellationToken
             );
-            var resultJson = JsonSerializer.Serialize(result, workflow.OutputType, _jsonSerializerOptions);
+
+            if (context.ParkRequested)
+            {
+                // ctx.Sleep threw to park the run but the workflow completed anyway, so user code
+                // swallowed the WorkflowSleepException (e.g. a broad try/catch around ctx.Sleep).
+                // Fail loudly instead of silently recording success and skipping the timer.
+                throw new InvalidOperationException(
+                    "Workflow completed after ctx.Sleep requested a durable park; its internal "
+                        + "control-flow exception was swallowed. Do not wrap ctx.Sleep in a broad catch."
+                );
+            }
+
+            var resultJson = JsonSerializer.Serialize(
+                result,
+                workflow.OutputType,
+                _jsonSerializerOptions
+            );
+
             if (leaseToken is null)
             {
-                await _workflowStore.RecordRunSuccessAsync(workflowRunId, resultJson, cancellationToken);
+                await _workflowStore.RecordRunSuccessAsync(
+                    workflowRunId,
+                    resultJson,
+                    cancellationToken
+                );
             }
             else
             {
@@ -166,6 +200,17 @@ internal sealed class WorkflowRunner(
 
             return resultJson;
         }
+        catch (WorkflowSleepException sleep)
+        {
+            await _workflowStore.RecordRunSleepingAsync(
+                workflowRunId,
+                sleep.TimerSequence,
+                sleep.FireAt,
+                leaseToken!,
+                CancellationToken.None
+            );
+            return null;
+        }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             throw;
@@ -174,7 +219,11 @@ internal sealed class WorkflowRunner(
         {
             if (leaseToken is null)
             {
-                await _workflowStore.RecordRunFailureAsync(workflowRunId, ex.ToString(), CancellationToken.None);
+                await _workflowStore.RecordRunFailureAsync(
+                    workflowRunId,
+                    ex.ToString(),
+                    CancellationToken.None
+                );
                 throw;
             }
 
@@ -221,13 +270,11 @@ internal sealed class WorkflowRunner(
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var job = await _activityStore.GetAsync(activityJobId.Value, cancellationToken);
-            if (job is null)
-            {
-                throw new InvalidOperationException(
+            var job =
+                await _activityStore.GetAsync(activityJobId.Value, cancellationToken)
+                ?? throw new InvalidOperationException(
                     $"Activity job '{activityJobId}' for workflow failure hook {hook.HookSequence} was not found."
                 );
-            }
 
             if (job.Status == JobStatus.Succeeded)
             {
@@ -249,6 +296,7 @@ internal sealed class WorkflowRunner(
                     error,
                     cancellationToken
                 );
+
                 throw new InvalidOperationException(
                     $"Workflow failure hook {hook.HookSequence} failed: {error}"
                 );

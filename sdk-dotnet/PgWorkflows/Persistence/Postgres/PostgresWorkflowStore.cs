@@ -18,7 +18,10 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         ArgumentException.ThrowIfNullOrWhiteSpace(request.WorkflowName);
         if (request.IdempotencyKey is not null && string.IsNullOrWhiteSpace(request.IdempotencyKey))
         {
-            throw new ArgumentException("Idempotency key cannot be empty or whitespace.", nameof(request));
+            throw new ArgumentException(
+                "Idempotency key cannot be empty or whitespace.",
+                nameof(request)
+            );
         }
 
         var workflowRunId = Guid.NewGuid();
@@ -325,7 +328,7 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         var now = DateTimeOffset.UtcNow;
         var status = retryable ? PendingStatus : FailedStatus;
 
-        const string sql = """
+        const string sql = $"""
             update pw_workflow_runs
             set status = @status,
                 updated_at = @updated_at,
@@ -333,9 +336,7 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
                 result = null,
                 error = @error,
                 visible_at = @visible_at,
-                workflow_worker_id = null,
-                lease_token = null,
-                lease_expires_at = null
+                {LeaseReleaseColumns}
             where workflow_run_id = @workflow_run_id
               and lease_token = @lease_token
               and status = @running_status;
@@ -347,14 +348,114 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("running_status", RunningStatus);
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("updated_at", now);
-        command.Parameters.AddWithValue(
-            "completed_at",
-            retryable ? DBNull.Value : now
-        );
+        command.Parameters.AddWithValue("completed_at", retryable ? DBNull.Value : now);
         command.Parameters.AddWithValue("error", error);
         command.Parameters.AddWithValue("visible_at", retryable ? nextVisibleAt ?? now : now);
 
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    public async ValueTask<bool> RecordRunSleepingAsync(
+        Guid workflowRunId,
+        int timerSequence,
+        DateTimeOffset fireAt,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        var now = DateTimeOffset.UtcNow;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        const string parkSql = $"""
+            update pw_workflow_runs
+            set status = @pending_status,
+                visible_at = @fire_at,
+                attempt = greatest(attempt - 1, 0),
+                updated_at = @updated_at,
+                completed_at = null,
+                result = null,
+                error = null,
+                {LeaseReleaseColumns}
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+              and status = @running_status;
+            """;
+
+        await using (var parkCommand = new NpgsqlCommand(parkSql, connection, transaction))
+        {
+            parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            parkCommand.Parameters.AddWithValue("lease_token", leaseToken);
+            parkCommand.Parameters.AddWithValue("pending_status", PendingStatus);
+            parkCommand.Parameters.AddWithValue("running_status", RunningStatus);
+            parkCommand.Parameters.AddWithValue("fire_at", fireAt);
+            parkCommand.Parameters.AddWithValue("updated_at", now);
+
+            if (await parkCommand.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                // Lease lost: another worker now owns the run. Write nothing and abandon.
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+
+        // Persist the deadline in the same transaction so the park and its durable fire time are
+        // atomic.
+        const string timerSql = """
+            insert into pw_workflow_timers (
+                workflow_run_id,
+                timer_seq,
+                fire_at,
+                created_at)
+            values (
+                @workflow_run_id,
+                @timer_seq,
+                @fire_at,
+                @created_at)
+            on conflict (workflow_run_id, timer_seq) do nothing;
+            """;
+
+        await using (var timerCommand = new NpgsqlCommand(timerSql, connection, transaction))
+        {
+            timerCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            timerCommand.Parameters.AddWithValue("timer_seq", timerSequence);
+            timerCommand.Parameters.AddWithValue("fire_at", fireAt);
+            timerCommand.Parameters.AddWithValue("created_at", now);
+
+            await timerCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
+    }
+
+    public async ValueTask<DateTimeOffset?> GetTimerAsync(
+        Guid workflowRunId,
+        int timerSequence,
+        CancellationToken cancellationToken = default
+    )
+    {
+        const string sql = """
+            select fire_at
+            from pw_workflow_timers
+            where workflow_run_id = @workflow_run_id
+              and timer_seq = @timer_seq;
+            """;
+
+        await using var command = _dataSource.CreateCommand(sql);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("timer_seq", timerSequence);
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return reader.GetFieldValue<DateTimeOffset>(0);
     }
 
     public async ValueTask<WorkflowStep?> GetStepAsync(
@@ -666,16 +767,14 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         CancellationToken cancellationToken
     )
     {
-        const string sql = """
+        const string sql = $"""
             update pw_workflow_runs
             set status = @status,
                 updated_at = @updated_at,
                 completed_at = @completed_at,
                 result = @result,
                 error = @error,
-                workflow_worker_id = null,
-                lease_token = null,
-                lease_expires_at = null
+                {LeaseReleaseColumns}
             where workflow_run_id = @workflow_run_id;
             """;
 
@@ -684,7 +783,11 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
         command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue("result", NpgsqlDbType.Jsonb, (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "result",
+            NpgsqlDbType.Jsonb,
+            (object?)resultJson ?? DBNull.Value
+        );
         command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -702,16 +805,14 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
 
-        const string sql = """
+        const string sql = $"""
             update pw_workflow_runs
             set status = @status,
                 updated_at = @updated_at,
                 completed_at = @completed_at,
                 result = @result,
                 error = @error,
-                workflow_worker_id = null,
-                lease_token = null,
-                lease_expires_at = null
+                {LeaseReleaseColumns}
             where workflow_run_id = @workflow_run_id
               and lease_token = @lease_token
               and status = @running_status;
@@ -724,7 +825,11 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
         command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue("result", NpgsqlDbType.Jsonb, (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "result",
+            NpgsqlDbType.Jsonb,
+            (object?)resultJson ?? DBNull.Value
+        );
         command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
 
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
@@ -757,7 +862,11 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
         command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue("result", NpgsqlDbType.Jsonb, (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "result",
+            NpgsqlDbType.Jsonb,
+            (object?)resultJson ?? DBNull.Value
+        );
         command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -790,7 +899,11 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         command.Parameters.AddWithValue("status", status);
         command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
         command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue("result", NpgsqlDbType.Jsonb, (object?)resultJson ?? DBNull.Value);
+        command.Parameters.AddWithValue(
+            "result",
+            NpgsqlDbType.Jsonb,
+            (object?)resultJson ?? DBNull.Value
+        );
         command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
 
         await command.ExecuteNonQueryAsync(cancellationToken);
@@ -802,8 +915,10 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
     private static Guid? ReadNullableGuid(NpgsqlDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ? null : reader.GetGuid(ordinal);
 
-    private static DateTimeOffset? ReadNullableDateTimeOffset(NpgsqlDataReader reader, int ordinal) =>
-        reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
+    private static DateTimeOffset? ReadNullableDateTimeOffset(
+        NpgsqlDataReader reader,
+        int ordinal
+    ) => reader.IsDBNull(ordinal) ? null : reader.GetFieldValue<DateTimeOffset>(ordinal);
 
     private static WorkflowFailureHook ReadFailureHook(NpgsqlDataReader reader) =>
         new(
@@ -860,8 +975,13 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             ScheduledStatus => WorkflowFailureHookStatus.Scheduled,
             SucceededStatus => WorkflowFailureHookStatus.Succeeded,
             FailedStatus => WorkflowFailureHookStatus.Failed,
-            _ => throw new InvalidOperationException($"Unknown workflow failure hook status '{value}'."),
+            _ => throw new InvalidOperationException(
+                $"Unknown workflow failure hook status '{value}'."
+            ),
         };
+
+    private const string LeaseReleaseColumns =
+        "workflow_worker_id = null, lease_token = null, lease_expires_at = null";
 
     private const string PendingStatus = "pending";
     private const string RunningStatus = "running";

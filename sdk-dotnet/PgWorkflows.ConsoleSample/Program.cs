@@ -26,8 +26,10 @@ builder.Services.AddPgWorkflows(pg =>
         )
         .AddWorkflow<GreetingWorkflow>()
         .AddWorkflow<CheckoutWorkflow>()
+        .AddWorkflow<ReminderWorkflow>()
         .AddActivities<HelloActivities>()
         .AddActivities<CheckoutActivities>()
+        .AddActivities<ReminderActivities>()
 );
 
 using var app = builder.Build();
@@ -58,6 +60,12 @@ try
         Console.WriteLine($"Checkout workflow run id: {checkoutHandle.WorkflowRunId}");
         Console.WriteLine($"Checkout failed as expected: {FirstLine(ex.Message)}");
     }
+
+    var reminderHandle = await workflows.StartAsync<ReminderWorkflow, string, string>("Grace");
+    Console.WriteLine($"Reminder workflow run id: {reminderHandle.WorkflowRunId}");
+    Console.WriteLine("Reminder workflow is sleeping on a durable timer (the run is parked)...");
+    var reminderResult = await reminderHandle.GetResultAsync();
+    Console.WriteLine($"Reminder workflow result: {reminderResult}");
 }
 finally
 {
@@ -146,6 +154,30 @@ internal sealed class CheckoutWorkflow
     }
 }
 
+[Workflow("console-sample-reminder-workflow")]
+internal sealed class ReminderWorkflow
+{
+    [WorkflowRun]
+    public async ValueTask<string> RunAsync(
+        IWorkflowContext ctx,
+        string name,
+        CancellationToken cancellationToken
+    )
+    {
+        await ctx.Activity(
+            (ReminderActivities activities) => activities.SendWelcome(name),
+            cancellationToken
+        );
+
+        await ctx.Sleep(TimeSpan.FromSeconds(3), cancellationToken);
+
+        return await ctx.Activity(
+            (ReminderActivities activities) => activities.SendReminder(name),
+            cancellationToken
+        );
+    }
+}
+
 internal sealed class HelloActivities
 {
     [Activity("hello")]
@@ -187,5 +219,22 @@ internal sealed class CheckoutActivities
     {
         Console.WriteLine($"Creating shipment for {userName}'s {itemName}...");
         throw new InvalidOperationException("Warehouse label printer is offline.");
+    }
+}
+
+internal sealed class ReminderActivities
+{
+    [Activity("send-welcome")]
+    public string SendWelcome(string name)
+    {
+        Console.WriteLine($"Welcome, {name}!");
+        return name;
+    }
+
+    [Activity("send-reminder")]
+    public string SendReminder(string name)
+    {
+        Console.WriteLine($"Reminder for {name}: your trial is ending soon.");
+        return $"Reminder sent to {name}.";
     }
 }
