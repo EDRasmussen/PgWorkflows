@@ -26,6 +26,7 @@ builder.Services.AddPgWorkflows(pg =>
         )
         .AddWorkflow<GreetingWorkflow>()
         .AddWorkflow<CheckoutWorkflow>()
+        .AddWorkflow<ApprovalWorkflow>()
         .AddWorkflow<ReminderWorkflow>()
         .AddActivities<HelloActivities>()
         .AddActivities<CheckoutActivities>()
@@ -61,6 +62,26 @@ try
         Console.WriteLine($"Checkout failed as expected: {FirstLine(ex.Message)}");
     }
 
+    var approvalHandle = await workflows.StartAsync<ApprovalWorkflow, string, string>(
+        "Deploy database migration"
+    );
+
+    Console.WriteLine($"Approval workflow run id: {approvalHandle.WorkflowRunId}");
+    Console.Write("Approve deployment? [y/N]: ");
+
+    var approved = string.Equals(
+        Console.ReadLine()?.Trim(),
+        "y",
+        StringComparison.OrdinalIgnoreCase
+    );
+
+    await approvalHandle.SignalAsync(
+        "approval",
+        new ApprovalDecision(approved, "console", approved ? "Approved" : "Rejected"),
+        idempotencyKey: $"console-approval:{approvalHandle.WorkflowRunId:N}"
+    );
+    Console.WriteLine(await approvalHandle.GetResultAsync());
+
     var reminderHandle = await workflows.StartAsync<ReminderWorkflow, string, string>("Grace");
     Console.WriteLine($"Reminder workflow run id: {reminderHandle.WorkflowRunId}");
     Console.WriteLine("Reminder workflow is sleeping on a durable timer (the run is parked)...");
@@ -84,6 +105,8 @@ internal sealed record InventoryReservation(string ReservationId, string UserNam
 internal sealed record ChargePaymentInput(string UserName, decimal Amount);
 
 internal sealed record PaymentReceipt(string PaymentId, string UserName, decimal Amount);
+
+internal sealed record ApprovalDecision(bool Approved, string UserId, string? Comment);
 
 [Workflow("console-sample-workflow")]
 internal sealed class GreetingWorkflow
@@ -151,6 +174,23 @@ internal sealed class CheckoutWorkflow
         );
 
         return "Checkout completed.";
+    }
+}
+
+[Workflow("console-sample-approval-workflow")]
+internal sealed class ApprovalWorkflow
+{
+    [WorkflowRun]
+    public async ValueTask<string> RunAsync(
+        IWorkflowContext ctx,
+        string request,
+        CancellationToken cancellationToken
+    )
+    {
+        var decision = await ctx.WaitForSignal<ApprovalDecision>("approval", cancellationToken);
+        return decision.Approved
+            ? $"{request} approved by {decision.UserId}: {decision.Comment}"
+            : $"{request} rejected by {decision.UserId}: {decision.Comment}";
     }
 }
 

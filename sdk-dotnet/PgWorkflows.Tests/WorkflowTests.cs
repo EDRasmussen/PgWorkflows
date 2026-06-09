@@ -914,6 +914,170 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         Assert.Contains("swallowed", run.Error);
     }
 
+    [Fact]
+    public async Task Workflow_consumes_buffered_signals_fifo_and_dedupes_idempotency_key()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<BufferedSignalWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<BufferedSignalWorkflow, string, string>("value");
+
+        await client.SignalAsync(
+            handle.WorkflowRunId,
+            "approval",
+            new SignalDecision("first"),
+            idempotencyKey: "approval-1"
+        );
+        await client.SignalAsync(
+            handle.WorkflowRunId,
+            "approval",
+            new SignalDecision("duplicate"),
+            idempotencyKey: "approval-1"
+        );
+        await client.SignalAsync(
+            handle.WorkflowRunId,
+            "approval",
+            new SignalDecision("second"),
+            idempotencyKey: "approval-2"
+        );
+
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var result = await handle.GetResultAsync();
+        Assert.Equal("first,second", result);
+        Assert.Equal(2, await CountSignalsAsync(handle.WorkflowRunId));
+    }
+
+    [Fact]
+    public async Task Workflow_wait_for_signal_parks_then_signal_wakes_and_resumes()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SingleSignalWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(30),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<SingleSignalWorkflow, string, string>("value");
+
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, parked!.Status);
+        Assert.False(await RunLeaseHeldAsync(handle.WorkflowRunId));
+        Assert.True(parked.VisibleAt > DateTimeOffset.UtcNow);
+
+        await handle.SignalAsync("approval", new SignalDecision("approved"));
+
+        var woken = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.True(woken!.VisibleAt <= DateTimeOffset.UtcNow);
+
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var result = await handle.GetResultAsync();
+        Assert.Equal("approved", result);
+        var succeeded = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Succeeded, succeeded!.Status);
+        Assert.Equal(1, succeeded.Attempt);
+    }
+
+    [Fact]
+    public async Task Signal_during_sleep_is_buffered_without_waking_timer_early()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SleepThenFailWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        SleepThenFailWorkflow.Reset();
+        var handle = await client.StartAsync<SleepThenFailWorkflow, string, string>("value");
+
+        Assert.Equal(1, await worker.RunOnceAsync());
+        var sleeping = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, sleeping!.Status);
+        Assert.True(sleeping.VisibleAt > DateTimeOffset.UtcNow);
+
+        await client.SignalAsync(handle.WorkflowRunId, "approval", new SignalDecision("early"));
+
+        var stillSleeping = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(sleeping.VisibleAt, stillSleeping!.VisibleAt);
+        Assert.Equal(0, await worker.RunOnceAsync());
+        Assert.Equal(1, await CountSignalsAsync(handle.WorkflowRunId));
+    }
+
+    [Fact]
+    public async Task Duplicate_signal_delivery_does_not_wake_parked_run()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<BufferedSignalWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<BufferedSignalWorkflow, string, string>("value");
+
+        await handle.SignalAsync("approval", new SignalDecision("first"), idempotencyKey: "approval-1");
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, parked!.Status);
+        Assert.True(parked.VisibleAt > DateTimeOffset.UtcNow);
+
+        // Redelivering the already-consumed signal buffers nothing and must not wake the run.
+        await handle.SignalAsync("approval", new SignalDecision("duplicate"), idempotencyKey: "approval-1");
+
+        var stillParked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(parked.VisibleAt, stillParked!.VisibleAt);
+        Assert.Equal(0, await worker.RunOnceAsync());
+        Assert.Equal(1, await CountSignalsAsync(handle.WorkflowRunId));
+
+        await handle.SignalAsync("approval", new SignalDecision("second"), idempotencyKey: "approval-2");
+        Assert.Equal(1, await worker.RunOnceAsync());
+        Assert.Equal("first,second", await handle.GetResultAsync());
+    }
+
     private async Task FireWorkflowTimerAsync(Guid workflowRunId, int timerSequence)
     {
         var past = DateTimeOffset.UtcNow.Subtract(TimeSpan.FromSeconds(1));
@@ -939,6 +1103,15 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         await using var command = DataSource.CreateCommand("select workflow_run_id from pw_workflow_runs;");
         var runId = (Guid)(await command.ExecuteScalarAsync())!;
         return (await WorkflowStore.GetRunAsync(runId))!;
+    }
+
+    private async Task<long> CountSignalsAsync(Guid workflowRunId)
+    {
+        await using var command = DataSource.CreateCommand(
+            "select count(*) from pw_workflow_signals where workflow_run_id = @workflow_run_id;"
+        );
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        return (long)(await command.ExecuteScalarAsync())!;
     }
 
     private async Task MarkWorkflowRunStaleAsync(Guid workflowRunId)
@@ -1436,6 +1609,39 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     }
 
     public sealed record FanOutInput(string Left, string Right);
+
+    public sealed record SignalDecision(string Value);
+
+    [Workflow]
+    public sealed class SingleSignalWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            var decision = await ctx.WaitForSignal<SignalDecision>("approval", cancellationToken);
+            return decision.Value;
+        }
+    }
+
+    [Workflow]
+    public sealed class BufferedSignalWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            var first = await ctx.WaitForSignal<SignalDecision>("approval", cancellationToken);
+            var second = await ctx.WaitForSignal<SignalDecision>("approval", cancellationToken);
+            return $"{first.Value},{second.Value}";
+        }
+    }
 
     [Workflow]
     public sealed class ClientGreetingWorkflow

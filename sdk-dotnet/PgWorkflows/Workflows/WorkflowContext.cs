@@ -11,7 +11,7 @@ internal sealed class WorkflowContext(
     IActivityJobStore activityStore,
     JsonSerializerOptions? jsonSerializerOptions,
     TimeSpan activityPollInterval,
-    bool canPark
+    string? leaseToken
 ) : IWorkflowContext
 {
     private readonly IWorkflowStore _workflowStore =
@@ -22,14 +22,17 @@ internal sealed class WorkflowContext(
     private readonly TimeSpan _activityPollInterval = activityPollInterval;
 
     /// <summary>
-    /// True when the run is leased by the workflow worker, which is the only context that may release
-    /// its lease and park (suspend) the run — for <c>ctx.Sleep</c> and while waiting on activity
-    /// steps. Inline (non-leased) execution holds no lease, so it block-polls instead.
+    /// The run's lease token when executed by the workflow worker, which is the only context that
+    /// may release its lease and park (suspend) the run — for <c>ctx.Sleep</c>,
+    /// <c>ctx.WaitForSignal</c>, and while waiting on activity steps. Inline (non-leased) execution
+    /// holds no lease, so it block-polls instead.
     /// </summary>
-    private readonly bool _canPark = canPark;
+    private readonly string? _leaseToken = leaseToken;
+    private readonly bool _canPark = leaseToken is not null;
     private int _nextStepSequence;
     private int _nextFailureHookSequence;
     private int _nextTimerSequence;
+    private int _nextSignalSequence;
 
     public Guid WorkflowRunId { get; } = workflowRunId;
 
@@ -76,6 +79,38 @@ internal sealed class WorkflowContext(
 
         ParkRequested = true;
         throw new WorkflowSleepException(timerSequence, fireAt.Value);
+    }
+
+    public async ValueTask<TSignal> WaitForSignal<TSignal>(
+        string name,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        if (!_canPark)
+        {
+            throw new NotSupportedException(
+                "ctx.WaitForSignal is only supported when the workflow is executed by the workflow "
+                    + "worker, not when executed inline in the caller."
+            );
+        }
+
+        var signalSequence = _nextSignalSequence++;
+        var payloadJson = await _workflowStore.ConsumeSignalAsync(
+            WorkflowRunId,
+            signalSequence,
+            name,
+            _leaseToken!,
+            cancellationToken
+        );
+
+        if (payloadJson is not null)
+        {
+            return JsonSerializer.Deserialize<TSignal>(payloadJson, _jsonSerializerOptions)!;
+        }
+
+        ParkRequested = true;
+        throw new WorkflowSignalWaitException(signalSequence, name);
     }
 
     public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(

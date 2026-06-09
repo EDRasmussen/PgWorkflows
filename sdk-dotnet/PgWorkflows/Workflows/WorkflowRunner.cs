@@ -119,6 +119,28 @@ internal sealed class WorkflowRunner(
         }
     }
 
+    internal async ValueTask SignalAsync<TSignal>(
+        Guid workflowRunId,
+        string name,
+        TSignal signal,
+        string? idempotencyKey = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        // A null payload would round-trip through JSON 'null' to a null-forgiven null in
+        // WaitForSignal<TSignal>, surfacing as an NRE inside the workflow, far from the sender.
+        ArgumentNullException.ThrowIfNull(signal);
+        var payloadJson = JsonSerializer.Serialize(signal, _jsonSerializerOptions);
+        await _workflowStore.RecordSignalAsync(
+            workflowRunId,
+            name,
+            payloadJson,
+            idempotencyKey,
+            cancellationToken
+        );
+    }
+
     private async ValueTask<string?> ExecuteCoreAsync(
         Guid workflowRunId,
         WorkflowDefinition workflow,
@@ -160,7 +182,7 @@ internal sealed class WorkflowRunner(
             _activityStore,
             _jsonSerializerOptions,
             ActivityPollInterval,
-            canPark: leaseToken is not null
+            leaseToken
         );
 
         try
@@ -179,9 +201,9 @@ internal sealed class WorkflowRunner(
                 // around ctx.Sleep / ctx.Activity / ctx.WhenAll). Fail loudly instead of silently
                 // recording success and skipping the suspend.
                 throw new InvalidOperationException(
-                    "Workflow completed after it requested a durable park (ctx.Sleep or an activity "
+                    "Workflow completed after it requested a durable park (ctx.Sleep, ctx.WaitForSignal, or an activity "
                         + "wait); its internal control-flow exception was swallowed. Do not wrap "
-                        + "ctx.Sleep, ctx.Activity, or ctx.WhenAll in a broad catch."
+                        + "ctx.Sleep, ctx.WaitForSignal, ctx.Activity, or ctx.WhenAll in a broad catch."
                 );
             }
 
@@ -217,6 +239,19 @@ internal sealed class WorkflowRunner(
                 workflowRunId,
                 sleep.TimerSequence,
                 sleep.FireAt,
+                leaseToken!,
+                CancellationToken.None
+            );
+            return null;
+        }
+        catch (WorkflowSignalWaitException signalWait)
+        {
+            // Unlike activity parks there is no grace deadline: a signal may take days to arrive,
+            // so the run parks open-ended and signal delivery wakes it via the edge-trigger.
+            await _workflowStore.RecordRunWaitingForSignalAsync(
+                workflowRunId,
+                signalWait.WaitSequence,
+                signalWait.SignalName,
                 leaseToken!,
                 CancellationToken.None
             );

@@ -25,6 +25,21 @@ public interface IWorkflowContext
     /// </remarks>
     ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Waits for one persisted external signal with the given <paramref name="name"/> and returns
+    /// its payload. Signals are buffered if delivered before this wait is reached, and multiple
+    /// signals with the same name are consumed in delivery order.
+    /// </summary>
+    /// <remarks>
+    /// Like <see cref="Sleep"/>, waiting for a signal requires the hosted workflow worker. It parks
+    /// the run by throwing an internal control-flow exception; do not wrap it in a broad
+    /// <c>catch</c> that swallows the park.
+    /// </remarks>
+    ValueTask<TSignal> WaitForSignal<TSignal>(
+        string name,
+        CancellationToken cancellationToken = default
+    );
+
     WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall
     );

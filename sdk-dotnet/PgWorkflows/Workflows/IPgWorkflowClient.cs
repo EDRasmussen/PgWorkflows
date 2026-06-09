@@ -15,4 +15,12 @@ public interface IPgWorkflowClient
         CancellationToken cancellationToken = default
     )
         where TWorkflow : class;
+
+    ValueTask SignalAsync<TSignal>(
+        Guid workflowRunId,
+        string name,
+        TSignal signal,
+        string? idempotencyKey = null,
+        CancellationToken cancellationToken = default
+    );
 }

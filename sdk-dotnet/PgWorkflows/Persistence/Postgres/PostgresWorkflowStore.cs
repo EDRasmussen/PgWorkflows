@@ -370,22 +370,7 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        const string parkSql = $"""
-            update pw_workflow_runs
-            set status = @pending_status,
-                visible_at = @fire_at,
-                attempt = greatest(attempt - 1, 0),
-                updated_at = @updated_at,
-                completed_at = null,
-                result = null,
-                error = null,
-                {LeaseReleaseColumns}
-            where workflow_run_id = @workflow_run_id
-              and lease_token = @lease_token
-              and status = @running_status;
-            """;
-
-        await using (var parkCommand = new NpgsqlCommand(parkSql, connection, transaction))
+        await using (var parkCommand = new NpgsqlCommand(SleepParkSql, connection, transaction))
         {
             parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
             parkCommand.Parameters.AddWithValue("lease_token", leaseToken);
@@ -444,44 +429,113 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         var now = DateTimeOffset.UtcNow;
         var graceDeadline = now + (grace > TimeSpan.Zero ? grace : TimeSpan.Zero);
 
-        // Park the run with a future visible_at (the safety net) only while it still has incomplete
-        // activity jobs; otherwise the jobs finished during the schedule→park window, so make the run
-        // immediately runnable (visible_at = now) rather than waiting out the grace. The edge-trigger
-        // in the activity store will pull visible_at forward to now when the last job completes.
-        const string parkSql = $"""
-            update pw_workflow_runs
-            set status = @pending_status,
-                visible_at = case
-                    when exists (
-                        select 1
-                        from pw_activity_jobs job
-                        where job.workflow_run_id = @workflow_run_id
-                          and job.status in ('pending', 'leased'))
-                    then @grace_deadline
-                    else @now
-                end,
-                attempt = greatest(attempt - 1, 0),
-                updated_at = @now,
-                completed_at = null,
-                result = null,
-                error = null,
-                {LeaseReleaseColumns}
-            where workflow_run_id = @workflow_run_id
-              and lease_token = @lease_token
-              and status = @running_status;
-            """;
-
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(parkSql, connection);
+        await using var command = new NpgsqlCommand(ActivityWaitParkSql, connection);
         command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
         command.Parameters.AddWithValue("lease_token", leaseToken);
         command.Parameters.AddWithValue("pending_status", PendingStatus);
         command.Parameters.AddWithValue("running_status", RunningStatus);
         command.Parameters.AddWithValue("now", now);
+        command.Parameters.AddWithValue("updated_at", now);
         command.Parameters.AddWithValue("grace_deadline", graceDeadline);
 
         // One row updated => parked (or made runnable). Zero => lease lost; abandon, write nothing.
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
+    public async ValueTask<bool> RecordRunWaitingForSignalAsync(
+        Guid workflowRunId,
+        int waitSequence,
+        string signalName,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(signalName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        var now = DateTimeOffset.UtcNow;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // The park is open-ended (visible_at = infinity): signal delivery wakes the run via the
+        // edge-trigger in RecordSignalAsync, so there is no point polling a wait that may take days.
+        // The park UPDATE runs first so every signal transaction acquires the run row before any
+        // other lock (same order as ConsumeSignalAsync/RecordSignalAsync), ruling out deadlocks.
+        await using (var parkCommand = new NpgsqlCommand(SignalParkSql, connection, transaction))
+        {
+            parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            parkCommand.Parameters.AddWithValue("lease_token", leaseToken);
+            parkCommand.Parameters.AddWithValue("pending_status", PendingStatus);
+            parkCommand.Parameters.AddWithValue("running_status", RunningStatus);
+            parkCommand.Parameters.AddWithValue("visible_at", DateTimeOffset.MaxValue);
+            parkCommand.Parameters.AddWithValue("updated_at", now);
+
+            if (await parkCommand.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                // Lease lost: another worker now owns the run. Write nothing and abandon.
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+
+        const string waitSql = """
+            insert into pw_workflow_signal_waits (
+                workflow_run_id,
+                wait_seq,
+                signal_name,
+                created_at,
+                completed_at)
+            values (
+                @workflow_run_id,
+                @wait_seq,
+                @signal_name,
+                @created_at,
+                null)
+            on conflict (workflow_run_id, wait_seq) do update
+            set signal_name = excluded.signal_name;
+            """;
+
+        await using (var waitCommand = new NpgsqlCommand(waitSql, connection, transaction))
+        {
+            waitCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            waitCommand.Parameters.AddWithValue("wait_seq", waitSequence);
+            waitCommand.Parameters.AddWithValue("signal_name", signalName);
+            waitCommand.Parameters.AddWithValue("created_at", now);
+
+            await waitCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        // Close the consume→park lost-wake race. A signal committed in that window saw the run
+        // still 'running' and skipped its wake; because RecordSignalAsync locks the run row before
+        // inserting, any such signal transaction either committed before the park UPDATE above
+        // acquired the row lock (visible to this statement's fresh snapshot) or is still blocked on
+        // it and will see the parked run when it resumes. So one re-check here covers the window.
+        const string recheckSql = """
+            update pw_workflow_runs
+            set visible_at = @now,
+                updated_at = @now
+            where workflow_run_id = @workflow_run_id
+              and exists (
+                  select 1
+                  from pw_workflow_signals signal
+                  where signal.workflow_run_id = @workflow_run_id
+                    and signal.signal_name = @signal_name
+                    and signal.consumed_by_wait_seq is null);
+            """;
+
+        await using (var recheckCommand = new NpgsqlCommand(recheckSql, connection, transaction))
+        {
+            recheckCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            recheckCommand.Parameters.AddWithValue("signal_name", signalName);
+            recheckCommand.Parameters.AddWithValue("now", now);
+
+            await recheckCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     public async ValueTask<DateTimeOffset?> GetTimerAsync(
@@ -508,6 +562,268 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         }
 
         return reader.GetFieldValue<DateTimeOffset>(0);
+    }
+
+    public async ValueTask<string?> ConsumeSignalAsync(
+        Guid workflowRunId,
+        int waitSequence,
+        string signalName,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(signalName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        var now = DateTimeOffset.UtcNow;
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // Lock the run row and verify the lease in one statement. This serializes consumption
+        // against RecordSignalAsync (which locks the same row before inserting) and fences out a
+        // worker whose lease was taken over — without it, two executors at the same wait could each
+        // claim a different signal, losing one and diverging from replay.
+        const string leaseSql = """
+            select 1
+            from pw_workflow_runs
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+            for update;
+            """;
+
+        await using (var leaseCommand = new NpgsqlCommand(leaseSql, connection, transaction))
+        {
+            leaseCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            leaseCommand.Parameters.AddWithValue("lease_token", leaseToken);
+
+            if (await leaseCommand.ExecuteScalarAsync(cancellationToken) is null)
+            {
+                // Lease lost: abandon without consuming. The caller unwinds to park, which is also
+                // lease-guarded and writes nothing.
+                await transaction.RollbackAsync(cancellationToken);
+                return null;
+            }
+        }
+
+        const string replaySql = """
+            select payload
+            from pw_workflow_signals
+            where workflow_run_id = @workflow_run_id
+              and signal_name = @signal_name
+              and consumed_by_wait_seq = @wait_seq
+            order by signal_seq
+            limit 1;
+            """;
+
+        await using (var replayCommand = new NpgsqlCommand(replaySql, connection, transaction))
+        {
+            replayCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            replayCommand.Parameters.AddWithValue("signal_name", signalName);
+            replayCommand.Parameters.AddWithValue("wait_seq", waitSequence);
+
+            var replayed = await replayCommand.ExecuteScalarAsync(cancellationToken);
+            if (replayed is not null and not DBNull)
+            {
+                await CompleteSignalWaitAsync(
+                    connection,
+                    transaction,
+                    workflowRunId,
+                    waitSequence,
+                    now,
+                    cancellationToken
+                );
+                await transaction.CommitAsync(cancellationToken);
+                return (string)replayed;
+            }
+        }
+
+        const string claimSql = """
+            update pw_workflow_signals as signal
+            set consumed_by_wait_seq = @wait_seq,
+                consumed_at = @consumed_at
+            where signal.workflow_run_id = @workflow_run_id
+              and signal.signal_seq = (
+                  select candidate.signal_seq
+                  from pw_workflow_signals as candidate
+                  where candidate.workflow_run_id = @workflow_run_id
+                    and candidate.signal_name = @signal_name
+                    and candidate.consumed_by_wait_seq is null
+                  order by candidate.signal_seq
+                  limit 1)
+            returning signal.payload;
+            """;
+
+        await using var claimCommand = new NpgsqlCommand(claimSql, connection, transaction);
+        claimCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        claimCommand.Parameters.AddWithValue("signal_name", signalName);
+        claimCommand.Parameters.AddWithValue("wait_seq", waitSequence);
+        claimCommand.Parameters.AddWithValue("consumed_at", now);
+
+        var claimed = await claimCommand.ExecuteScalarAsync(cancellationToken);
+        if (claimed is null or DBNull)
+        {
+            await transaction.CommitAsync(cancellationToken);
+            return null;
+        }
+
+        await CompleteSignalWaitAsync(
+            connection,
+            transaction,
+            workflowRunId,
+            waitSequence,
+            now,
+            cancellationToken
+        );
+        await transaction.CommitAsync(cancellationToken);
+        return (string)claimed;
+    }
+
+    public async ValueTask<Guid> RecordSignalAsync(
+        Guid workflowRunId,
+        string signalName,
+        string payloadJson,
+        string? idempotencyKey = null,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(signalName);
+        ArgumentNullException.ThrowIfNull(payloadJson);
+        if (idempotencyKey is not null && string.IsNullOrWhiteSpace(idempotencyKey))
+        {
+            throw new ArgumentException(
+                "Idempotency key cannot be empty or whitespace.",
+                nameof(idempotencyKey)
+            );
+        }
+
+        var signalId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        const string runSql = """
+            select status
+            from pw_workflow_runs
+            where workflow_run_id = @workflow_run_id
+            for update;
+            """;
+
+        string runStatus;
+        await using (var runCommand = new NpgsqlCommand(runSql, connection, transaction))
+        {
+            runCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            var status = await runCommand.ExecuteScalarAsync(cancellationToken);
+            if (status is null or DBNull)
+            {
+                await transaction.RollbackAsync(cancellationToken);
+                throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
+            }
+
+            runStatus = (string)status;
+        }
+
+        if (runStatus is SucceededStatus or FailedStatus)
+        {
+            await transaction.RollbackAsync(cancellationToken);
+            throw new InvalidOperationException(
+                $"Cannot signal workflow run '{workflowRunId}' because it is {runStatus}."
+            );
+        }
+
+        const string insertSql = """
+            insert into pw_workflow_signals (
+                workflow_run_id,
+                signal_id,
+                signal_name,
+                idempotency_key,
+                payload,
+                created_at,
+                consumed_by_wait_seq,
+                consumed_at)
+            values (
+                @workflow_run_id,
+                @signal_id,
+                @signal_name,
+                @idempotency_key,
+                @payload,
+                @created_at,
+                null,
+                null)
+            on conflict (workflow_run_id, signal_name, idempotency_key)
+                where idempotency_key is not null
+            do nothing
+            returning signal_id;
+            """;
+
+        object? inserted;
+        await using (var insertCommand = new NpgsqlCommand(insertSql, connection, transaction))
+        {
+            insertCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            insertCommand.Parameters.AddWithValue("signal_id", signalId);
+            insertCommand.Parameters.AddWithValue("signal_name", signalName);
+            insertCommand.Parameters.AddWithValue(
+                "idempotency_key",
+                NpgsqlDbType.Text,
+                (object?)idempotencyKey ?? DBNull.Value
+            );
+            insertCommand.Parameters.AddWithValue("payload", NpgsqlDbType.Jsonb, payloadJson);
+            insertCommand.Parameters.AddWithValue("created_at", now);
+
+            inserted = await insertCommand.ExecuteScalarAsync(cancellationToken);
+        }
+
+        if (inserted is null or DBNull)
+        {
+            // Duplicate idempotent delivery: nothing new was buffered, so skip the wake — waking a
+            // parked run here would only force a full replay that finds nothing to consume. Return
+            // the previously recorded signal's id.
+            const string existingSql = """
+                select signal_id
+                from pw_workflow_signals
+                where workflow_run_id = @workflow_run_id
+                  and signal_name = @signal_name
+                  and idempotency_key = @idempotency_key;
+                """;
+
+            await using var existingCommand = new NpgsqlCommand(existingSql, connection, transaction);
+            existingCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            existingCommand.Parameters.AddWithValue("signal_name", signalName);
+            existingCommand.Parameters.AddWithValue("idempotency_key", idempotencyKey!);
+
+            var existing = (Guid)(await existingCommand.ExecuteScalarAsync(cancellationToken))!;
+            await transaction.CommitAsync(cancellationToken);
+            return existing;
+        }
+
+        const string wakeSql = """
+            update pw_workflow_runs
+            set visible_at = @now,
+                updated_at = @now
+            where workflow_run_id = @workflow_run_id
+              and status = @pending_status
+              and lease_token is null
+              and visible_at > @now
+              and exists (
+                  select 1
+                  from pw_workflow_signal_waits wait
+                  where wait.workflow_run_id = pw_workflow_runs.workflow_run_id
+                    and wait.signal_name = @signal_name
+                    and wait.completed_at is null);
+            """;
+
+        await using (var wakeCommand = new NpgsqlCommand(wakeSql, connection, transaction))
+        {
+            wakeCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            wakeCommand.Parameters.AddWithValue("signal_name", signalName);
+            wakeCommand.Parameters.AddWithValue("pending_status", PendingStatus);
+            wakeCommand.Parameters.AddWithValue("now", now);
+
+            await wakeCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return (Guid)inserted;
     }
 
     public async ValueTask<WorkflowStep?> GetStepAsync(
@@ -961,6 +1277,30 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    private static async ValueTask CompleteSignalWaitAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction transaction,
+        Guid workflowRunId,
+        int waitSequence,
+        DateTimeOffset completedAt,
+        CancellationToken cancellationToken
+    )
+    {
+        const string sql = """
+            update pw_workflow_signal_waits
+            set completed_at = coalesce(completed_at, @completed_at)
+            where workflow_run_id = @workflow_run_id
+              and wait_seq = @wait_seq;
+            """;
+
+        await using var command = new NpgsqlCommand(sql, connection, transaction);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("wait_seq", waitSequence);
+        command.Parameters.AddWithValue("completed_at", completedAt);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static string? ReadNullableString(NpgsqlDataReader reader, int ordinal) =>
         reader.IsDBNull(ordinal) ? null : reader.GetString(ordinal);
 
@@ -1034,6 +1374,50 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
 
     private const string LeaseReleaseColumns =
         "workflow_worker_id = null, lease_token = null, lease_expires_at = null";
+
+    /// <summary>
+    /// Shared shape of every park: flip the run back to pending, roll back the attempt the lease
+    /// charged (a park is not a failed attempt), clear completion state, and release the lease —
+    /// guarded by the lease token so a lost lease writes nothing. Only the visible_at policy
+    /// differs per wait kind.
+    /// </summary>
+    private static string BuildParkSql(string visibleAtExpression) =>
+        $"""
+        update pw_workflow_runs
+        set status = @pending_status,
+            visible_at = {visibleAtExpression},
+            attempt = greatest(attempt - 1, 0),
+            updated_at = @updated_at,
+            completed_at = null,
+            result = null,
+            error = null,
+            {LeaseReleaseColumns}
+        where workflow_run_id = @workflow_run_id
+          and lease_token = @lease_token
+          and status = @running_status;
+        """;
+
+    private static readonly string SleepParkSql = BuildParkSql("@fire_at");
+
+    private static readonly string SignalParkSql = BuildParkSql("@visible_at");
+
+    // Park with a future visible_at (the safety net) only while the run still has incomplete
+    // activity jobs; otherwise the jobs finished during the schedule→park window, so make the run
+    // immediately runnable (visible_at = now) rather than waiting out the grace. The edge-trigger
+    // in the activity store will pull visible_at forward to now when the last job completes.
+    private static readonly string ActivityWaitParkSql = BuildParkSql(
+        """
+        case
+            when exists (
+                select 1
+                from pw_activity_jobs job
+                where job.workflow_run_id = @workflow_run_id
+                  and job.status in ('pending', 'leased'))
+            then @grace_deadline
+            else @now
+        end
+        """
+    );
 
     private const string PendingStatus = "pending";
     private const string RunningStatus = "running";

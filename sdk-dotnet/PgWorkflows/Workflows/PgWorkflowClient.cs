@@ -51,9 +51,19 @@ internal sealed class PgWorkflowClient(
             workflowRunId,
             (runId, ct) => _executeWorkflowsInCaller
                 ? _runner.ExecuteAsync<TOutput>(runId, definition, _serviceProvider, ct)
-                : _runner.WaitForResultAsync<TOutput>(runId, ct)
+                : _runner.WaitForResultAsync<TOutput>(runId, ct),
+            _runner
         );
     }
+
+    public ValueTask SignalAsync<TSignal>(
+        Guid workflowRunId,
+        string name,
+        TSignal signal,
+        string? idempotencyKey = null,
+        CancellationToken cancellationToken = default
+    ) =>
+        _runner.SignalAsync(workflowRunId, name, signal, idempotencyKey, cancellationToken);
 
     private static void EnsureType<TActual>(Type expected, string role, Type workflowType)
     {

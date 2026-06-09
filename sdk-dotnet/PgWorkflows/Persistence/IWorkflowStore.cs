@@ -75,6 +75,21 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    /// <summary>
+    /// Parks a leased run that is waiting for an external signal. The park is open-ended (no
+    /// deadline): signal delivery wakes the run via the edge-trigger in
+    /// <see cref="RecordSignalAsync"/>, and a matching unconsumed signal that arrived during the
+    /// consume→park window makes the run immediately runnable instead, closing the lost-wake race.
+    /// Returns false when the lease was lost; in that case nothing is written.
+    /// </summary>
+    ValueTask<bool> RecordRunWaitingForSignalAsync(
+        Guid workflowRunId,
+        int waitSequence,
+        string signalName,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask RecordRunFailureAsync(
         Guid workflowRunId,
         string error,
@@ -106,6 +121,34 @@ internal interface IWorkflowStore
     ValueTask<DateTimeOffset?> GetTimerAsync(
         Guid workflowRunId,
         int timerSequence,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
+    /// Claims the oldest unconsumed signal with the given name for the given wait (or replays the
+    /// signal already recorded for that wait) and returns its payload. The run row is locked and
+    /// the lease verified first, which serializes consumption against signal delivery and fences
+    /// out a worker whose lease was taken over. Returns null when no signal is buffered or the
+    /// lease was lost; in the latter case nothing is written.
+    /// </summary>
+    ValueTask<string?> ConsumeSignalAsync(
+        Guid workflowRunId,
+        int waitSequence,
+        string signalName,
+        string leaseToken,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
+    /// Buffers a signal for a run and wakes the run if it is parked waiting on that signal name.
+    /// Duplicate deliveries (same <paramref name="idempotencyKey"/>) buffer nothing and do not
+    /// wake the run. Throws when the run does not exist or has already completed.
+    /// </summary>
+    ValueTask<Guid> RecordSignalAsync(
+        Guid workflowRunId,
+        string signalName,
+        string payloadJson,
+        string? idempotencyKey = null,
         CancellationToken cancellationToken = default
     );
 
