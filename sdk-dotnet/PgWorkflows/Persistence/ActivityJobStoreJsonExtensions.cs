@@ -26,7 +26,7 @@ internal static class ActivityJobStoreJsonExtensions
             maxAttempts,
             visibleAt,
             idempotencyKey,
-            cancellationToken
+            cancellationToken: cancellationToken
         );
     }
 
@@ -51,7 +51,7 @@ internal static class ActivityJobStoreJsonExtensions
             maxAttempts,
             visibleAt,
             idempotencyKey,
-            cancellationToken
+            cancellationToken: cancellationToken
         );
     }
 }

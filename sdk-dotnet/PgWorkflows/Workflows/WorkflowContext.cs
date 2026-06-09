@@ -11,7 +11,7 @@ internal sealed class WorkflowContext(
     IActivityJobStore activityStore,
     JsonSerializerOptions? jsonSerializerOptions,
     TimeSpan activityPollInterval,
-    bool canSleep
+    bool canPark
 ) : IWorkflowContext
 {
     private readonly IWorkflowStore _workflowStore =
@@ -20,7 +20,13 @@ internal sealed class WorkflowContext(
         activityStore ?? throw new ArgumentNullException(nameof(activityStore));
     private readonly JsonSerializerOptions? _jsonSerializerOptions = jsonSerializerOptions;
     private readonly TimeSpan _activityPollInterval = activityPollInterval;
-    private readonly bool _canSleep = canSleep;
+
+    /// <summary>
+    /// True when the run is leased by the workflow worker, which is the only context that may release
+    /// its lease and park (suspend) the run — for <c>ctx.Sleep</c> and while waiting on activity
+    /// steps. Inline (non-leased) execution holds no lease, so it block-polls instead.
+    /// </summary>
+    private readonly bool _canPark = canPark;
     private int _nextStepSequence;
     private int _nextFailureHookSequence;
     private int _nextTimerSequence;
@@ -37,7 +43,7 @@ internal sealed class WorkflowContext(
 
     public async ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default)
     {
-        if (!_canSleep)
+        if (!_canPark)
         {
             throw new NotSupportedException(
                 "ctx.Sleep is only supported when the workflow is executed by the workflow worker, "
@@ -182,14 +188,42 @@ internal sealed class WorkflowContext(
         }
 
         var firstStepSequence = ReserveStepSequences(activityCalls.Length);
-        var tasks = new Task<TOutput>[activityCalls.Length];
-        for (var index = 0; index < activityCalls.Length; index++)
+        var handles = await ScheduleFanOutAsync(
+            firstStepSequence,
+            activityCalls,
+            cancellationToken
+        );
+
+        if (_canPark)
         {
-            tasks[index] = RunActivityStepAsync<TOutput>(
-                firstStepSequence + index,
-                activityCalls[index],
-                cancellationToken
-            ).AsTask();
+            var resolutions = new StepResolution<TOutput>[handles.Length];
+            var outcomes = new StepOutcome[handles.Length];
+            for (var index = 0; index < handles.Length; index++)
+            {
+                resolutions[index] = await ResolveStepAsync<TOutput>(
+                    handles[index],
+                    cancellationToken
+                );
+                outcomes[index] = resolutions[index].ToOutcome(handles[index].Sequence);
+            }
+
+            // Parks if any sibling is outstanding, else records all and throws the lowest-sequence
+            // failure; only returns here when every sibling succeeded.
+            await CommitFanOutAsync(outcomes, cancellationToken);
+
+            var results = new TOutput[handles.Length];
+            for (var index = 0; index < handles.Length; index++)
+            {
+                results[index] = resolutions[index].Value;
+            }
+
+            return results;
+        }
+
+        var tasks = new Task<TOutput>[handles.Length];
+        for (var index = 0; index < handles.Length; index++)
+        {
+            tasks[index] = BlockPollStepAsync<TOutput>(handles[index], cancellationToken).AsTask();
         }
 
         return await Task.WhenAll(tasks);
@@ -202,17 +236,25 @@ internal sealed class WorkflowContext(
     )
     {
         var firstStepSequence = ReserveStepSequences(2);
-        var firstTask = RunActivityStepAsync<T1>(
+        var handles = await ScheduleFanOutAsync(
             firstStepSequence,
-            GetCall(first),
+            [GetCall(first), GetCall(second)],
             cancellationToken
-        ).AsTask();
-        var secondTask = RunActivityStepAsync<T2>(
-            firstStepSequence + 1,
-            GetCall(second),
-            cancellationToken
-        ).AsTask();
+        );
 
+        if (_canPark)
+        {
+            var first2 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
+            var second2 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
+            await CommitFanOutAsync(
+                [first2.ToOutcome(handles[0].Sequence), second2.ToOutcome(handles[1].Sequence)],
+                cancellationToken
+            );
+            return (first2.Value, second2.Value);
+        }
+
+        var firstTask = BlockPollStepAsync<T1>(handles[0], cancellationToken).AsTask();
+        var secondTask = BlockPollStepAsync<T2>(handles[1], cancellationToken).AsTask();
         await Task.WhenAll(firstTask, secondTask);
         return (await firstTask, await secondTask);
     }
@@ -225,22 +267,31 @@ internal sealed class WorkflowContext(
     )
     {
         var firstStepSequence = ReserveStepSequences(3);
-        var firstTask = RunActivityStepAsync<T1>(
+        var handles = await ScheduleFanOutAsync(
             firstStepSequence,
-            GetCall(first),
+            [GetCall(first), GetCall(second), GetCall(third)],
             cancellationToken
-        ).AsTask();
-        var secondTask = RunActivityStepAsync<T2>(
-            firstStepSequence + 1,
-            GetCall(second),
-            cancellationToken
-        ).AsTask();
-        var thirdTask = RunActivityStepAsync<T3>(
-            firstStepSequence + 2,
-            GetCall(third),
-            cancellationToken
-        ).AsTask();
+        );
 
+        if (_canPark)
+        {
+            var first3 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
+            var second3 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
+            var third3 = await ResolveStepAsync<T3>(handles[2], cancellationToken);
+            await CommitFanOutAsync(
+                [
+                    first3.ToOutcome(handles[0].Sequence),
+                    second3.ToOutcome(handles[1].Sequence),
+                    third3.ToOutcome(handles[2].Sequence),
+                ],
+                cancellationToken
+            );
+            return (first3.Value, second3.Value, third3.Value);
+        }
+
+        var firstTask = BlockPollStepAsync<T1>(handles[0], cancellationToken).AsTask();
+        var secondTask = BlockPollStepAsync<T2>(handles[1], cancellationToken).AsTask();
+        var thirdTask = BlockPollStepAsync<T3>(handles[2], cancellationToken).AsTask();
         await Task.WhenAll(firstTask, secondTask, thirdTask);
         return (await firstTask, await secondTask, await thirdTask);
     }
@@ -251,10 +302,39 @@ internal sealed class WorkflowContext(
     )
     {
         var stepSequence = ReserveStepSequences(1);
-        return await RunActivityStepAsync<TOutput>(stepSequence, activityCall, cancellationToken);
+        var handle = await EnsureStepScheduledAsync(stepSequence, activityCall, cancellationToken);
+
+        if (!_canPark)
+        {
+            return await BlockPollStepAsync<TOutput>(handle, cancellationToken);
+        }
+
+        var resolution = await ResolveStepAsync<TOutput>(handle, cancellationToken);
+        if (!resolution.Ready)
+        {
+            // Outstanding: release the lease and park until the step completes (the runner records
+            // the wait). The whole workflow replays on resume; this step's result is then memoized.
+            Park();
+        }
+
+        await FinalizeOutcomeAsync(resolution.ToOutcome(handle.Sequence), cancellationToken);
+        if (resolution.Error is { } error)
+        {
+            throw new InvalidOperationException(
+                $"Workflow activity step {handle.Sequence} failed: {error}"
+            );
+        }
+
+        return resolution.Value;
     }
 
-    private async ValueTask<TOutput> RunActivityStepAsync<TOutput>(
+    /// <summary>
+    /// Ensures a step's activity job is enqueued and the step row recorded (idempotent on replay —
+    /// an existing step row short-circuits). Never parks or throws on activity failure; that is the
+    /// resolve phase's job. The job carries this run's id so the activity store can wake the run when
+    /// the step (and its fan-out siblings) finish.
+    /// </summary>
+    private async ValueTask<StepHandle> EnsureStepScheduledAsync(
         int stepSequence,
         WorkflowActivityCall activityCall,
         CancellationToken cancellationToken
@@ -266,77 +346,275 @@ internal sealed class WorkflowContext(
             cancellationToken
         );
 
-        if (step is { Status: WorkflowStepStatus.Succeeded })
+        if (step is not null)
         {
-            return DeserializeResult<TOutput>(step.ResultJson);
+            return new StepHandle(stepSequence, step.ActivityJobId, step);
         }
 
-        if (step is { Status: WorkflowStepStatus.Failed })
+        var activityJobId = await _activityStore.EnqueueAsync(
+            activityCall.ActivityName,
+            activityCall.InputJson,
+            idempotencyKey: $"workflow:{WorkflowRunId:N}:{stepSequence}",
+            workflowRunId: WorkflowRunId,
+            cancellationToken: cancellationToken
+        );
+
+        await _workflowStore.RecordStepScheduledAsync(
+            WorkflowRunId,
+            stepSequence,
+            activityCall.ActivityName,
+            activityJobId,
+            activityCall.InputJson,
+            cancellationToken
+        );
+
+        return new StepHandle(stepSequence, activityJobId, Step: null);
+    }
+
+    /// <summary>
+    /// Reads the current outcome of a step from its memoized step row, else its activity job — purely
+    /// observational, writing nothing. Returning the outcome (rather than acting on it) lets a
+    /// fan-out decide to wait for all siblings before committing successes or surfacing a failure,
+    /// matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/> semantics.
+    /// </summary>
+    private async ValueTask<StepResolution<TOutput>> ResolveStepAsync<TOutput>(
+        StepHandle handle,
+        CancellationToken cancellationToken
+    )
+    {
+        if (handle.Step is { Status: WorkflowStepStatus.Succeeded } succeededStep)
         {
-            throw new InvalidOperationException(
-                $"Workflow activity step {stepSequence} previously failed: {step.Error}"
+            return StepResolution<TOutput>.Succeeded(
+                DeserializeResult<TOutput>(succeededStep.ResultJson),
+                succeededStep.ResultJson
             );
         }
 
-        var activityJobId = step?.ActivityJobId;
-        if (activityJobId is null)
+        if (handle.Step is { Status: WorkflowStepStatus.Failed } failedStep)
         {
-            activityJobId = await _activityStore.EnqueueAsync(
-                activityCall.ActivityName,
-                activityCall.InputJson,
-                idempotencyKey: $"workflow:{WorkflowRunId:N}:{stepSequence}",
-                cancellationToken: cancellationToken
+            return StepResolution<TOutput>.Failed(failedStep.Error ?? "Activity failed.");
+        }
+
+        var job =
+            await _activityStore.GetAsync(handle.JobId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"Activity job '{handle.JobId}' for workflow step {handle.Sequence} was not found."
             );
 
-            await _workflowStore.RecordStepScheduledAsync(
+        return job.Status switch
+        {
+            JobStatus.Succeeded => StepResolution<TOutput>.Succeeded(
+                DeserializeResult<TOutput>(job.ResultJson),
+                job.ResultJson
+            ),
+            JobStatus.Failed => StepResolution<TOutput>.Failed(job.Error ?? "Activity failed."),
+            _ => StepResolution<TOutput>.Pending(),
+        };
+    }
+
+    /// <summary>
+    /// Schedules a whole fan-out: reads any existing step rows, then enqueues every not-yet-scheduled
+    /// activity job back-to-back (before recording any step row) so the siblings land in the queue
+    /// together and an activity worker can co-schedule them — rather than interleaving an enqueue and
+    /// a step-row write per sibling, which would widen the window for a worker to lease only a subset.
+    /// Idempotent on replay: an existing step row reuses its job.
+    /// </summary>
+    private async ValueTask<StepHandle[]> ScheduleFanOutAsync(
+        int firstStepSequence,
+        WorkflowActivityCall[] activityCalls,
+        CancellationToken cancellationToken
+    )
+    {
+        var existing = new WorkflowStep?[activityCalls.Length];
+        for (var index = 0; index < activityCalls.Length; index++)
+        {
+            existing[index] = await _workflowStore.GetStepAsync(
                 WorkflowRunId,
-                stepSequence,
-                activityCall.ActivityName,
-                activityJobId.Value,
-                activityCall.InputJson,
+                firstStepSequence + index,
                 cancellationToken
             );
         }
 
+        var jobIds = new Guid[activityCalls.Length];
+        var newlyEnqueued = new bool[activityCalls.Length];
+        var enqueueTasks = new Task<Guid>?[activityCalls.Length];
+        for (var index = 0; index < activityCalls.Length; index++)
+        {
+            if (existing[index] is { } step)
+            {
+                jobIds[index] = step.ActivityJobId;
+                continue;
+            }
+
+            // Issue the enqueues concurrently (not one-after-another) so the fan-out siblings land in
+            // the queue together and an activity worker's batch poll can co-schedule them, rather than
+            // leasing only the first while the rest are still being inserted.
+            enqueueTasks[index] = _activityStore
+                .EnqueueAsync(
+                    activityCalls[index].ActivityName,
+                    activityCalls[index].InputJson,
+                    idempotencyKey: $"workflow:{WorkflowRunId:N}:{firstStepSequence + index}",
+                    workflowRunId: WorkflowRunId,
+                    cancellationToken: cancellationToken
+                )
+                .AsTask();
+            newlyEnqueued[index] = true;
+        }
+
+        for (var index = 0; index < activityCalls.Length; index++)
+        {
+            if (enqueueTasks[index] is { } enqueueTask)
+            {
+                jobIds[index] = await enqueueTask;
+            }
+        }
+
+        var handles = new StepHandle[activityCalls.Length];
+        for (var index = 0; index < activityCalls.Length; index++)
+        {
+            if (newlyEnqueued[index])
+            {
+                await _workflowStore.RecordStepScheduledAsync(
+                    WorkflowRunId,
+                    firstStepSequence + index,
+                    activityCalls[index].ActivityName,
+                    jobIds[index],
+                    activityCalls[index].InputJson,
+                    cancellationToken
+                );
+            }
+
+            handles[index] = new StepHandle(
+                firstStepSequence + index,
+                jobIds[index],
+                existing[index]
+            );
+        }
+
+        return handles;
+    }
+
+    /// <summary>
+    /// Commits a resolved fan-out: parks if any sibling is still outstanding (so the run waits for the
+    /// whole batch, matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/>), otherwise
+    /// records every outcome and throws the lowest-sequence failure if any. Outcomes are supplied in
+    /// step-sequence order, so the first failure encountered is the lowest sequence.
+    /// </summary>
+    private async ValueTask CommitFanOutAsync(
+        StepOutcome[] outcomes,
+        CancellationToken cancellationToken
+    )
+    {
+        foreach (var outcome in outcomes)
+        {
+            if (!outcome.Ready)
+            {
+                Park();
+            }
+        }
+
+        StepOutcome? failure = null;
+        foreach (var outcome in outcomes)
+        {
+            await FinalizeOutcomeAsync(outcome, cancellationToken);
+            if (outcome.Error is not null && failure is null)
+            {
+                failure = outcome;
+            }
+        }
+
+        if (failure is { } first)
+        {
+            throw new InvalidOperationException(
+                $"Workflow activity step {first.Sequence} failed: {first.Error}"
+            );
+        }
+    }
+
+    /// <summary>
+    /// Block-polls a single already-scheduled step to completion. Used only for inline (non-leased)
+    /// execution, which cannot park; the activity still runs on any activity worker.
+    /// </summary>
+    private async ValueTask<TOutput> BlockPollStepAsync<TOutput>(
+        StepHandle handle,
+        CancellationToken cancellationToken
+    )
+    {
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
 
-            var job = await _activityStore.GetAsync(activityJobId.Value, cancellationToken);
-            if (job is null)
+            var resolution = await ResolveStepAsync<TOutput>(handle, cancellationToken);
+            if (resolution.Ready)
             {
-                throw new InvalidOperationException(
-                    $"Activity job '{activityJobId}' for workflow step {stepSequence} was not found."
-                );
-            }
+                await FinalizeOutcomeAsync(resolution.ToOutcome(handle.Sequence), cancellationToken);
+                if (resolution.Error is { } error)
+                {
+                    throw new InvalidOperationException(
+                        $"Workflow activity step {handle.Sequence} failed: {error}"
+                    );
+                }
 
-            if (job.Status == JobStatus.Succeeded)
-            {
-                await _workflowStore.RecordStepSuccessAsync(
-                    WorkflowRunId,
-                    stepSequence,
-                    job.ResultJson,
-                    cancellationToken
-                );
-                return DeserializeResult<TOutput>(job.ResultJson);
-            }
-
-            if (job.Status == JobStatus.Failed)
-            {
-                var error = job.Error ?? "Activity failed.";
-                await _workflowStore.RecordStepFailureAsync(
-                    WorkflowRunId,
-                    stepSequence,
-                    error,
-                    cancellationToken
-                );
-                throw new InvalidOperationException(
-                    $"Workflow activity step {stepSequence} failed: {error}"
-                );
+                return resolution.Value;
             }
 
             await Task.Delay(_activityPollInterval, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// Durably records a resolved (non-pending) step's outcome so it is memoized across replays.
+    /// Idempotent: re-recording an already-terminal step is harmless.
+    /// </summary>
+    private ValueTask FinalizeOutcomeAsync(StepOutcome outcome, CancellationToken cancellationToken) =>
+        outcome.Error is { } error
+            ? _workflowStore.RecordStepFailureAsync(
+                WorkflowRunId,
+                outcome.Sequence,
+                error,
+                cancellationToken
+            )
+            : _workflowStore.RecordStepSuccessAsync(
+                WorkflowRunId,
+                outcome.Sequence,
+                outcome.ResultJson,
+                cancellationToken
+            );
+
+    private void Park()
+    {
+        // Mirror ctx.Sleep: flag the requested suspend so the runner fails loudly if user code
+        // swallows the control-flow exception, then unwind so the runner can release the lease.
+        ParkRequested = true;
+        throw new WorkflowParkException();
+    }
+
+    private readonly record struct StepHandle(int Sequence, Guid JobId, WorkflowStep? Step);
+
+    /// <summary>Type-erased resolved outcome of a step, used to record/surface it uniformly.</summary>
+    private readonly record struct StepOutcome(
+        int Sequence,
+        bool Ready,
+        string? ResultJson,
+        string? Error
+    );
+
+    private readonly record struct StepResolution<TOutput>(
+        bool Ready,
+        TOutput Value,
+        string? ResultJson,
+        string? Error
+    )
+    {
+        public static StepResolution<TOutput> Pending() => new(false, default!, null, null);
+
+        public static StepResolution<TOutput> Succeeded(TOutput value, string? resultJson) =>
+            new(true, value, resultJson, null);
+
+        public static StepResolution<TOutput> Failed(string error) =>
+            new(true, default!, null, error);
+
+        public StepOutcome ToOutcome(int sequence) => new(sequence, Ready, ResultJson, Error);
     }
 
     private int ReserveStepSequences(int count)

@@ -26,6 +26,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         int maxAttempts = 1,
         DateTimeOffset? visibleAt = null,
         string? idempotencyKey = null,
+        Guid? workflowRunId = null,
         CancellationToken cancellationToken = default
     )
     {
@@ -44,6 +45,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 job_id,
                 activity_name,
                 idempotency_key,
+                workflow_run_id,
                 input,
                 status,
                 attempt,
@@ -59,6 +61,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 @job_id,
                 @activity_name,
                 @idempotency_key,
+                @workflow_run_id,
                 @input,
                 @status,
                 @attempt,
@@ -83,6 +86,11 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             "idempotency_key",
             NpgsqlDbType.Text,
             (object?)idempotencyKey ?? DBNull.Value
+        );
+        command.Parameters.AddWithValue(
+            "workflow_run_id",
+            NpgsqlDbType.Uuid,
+            (object?)workflowRunId ?? DBNull.Value
         );
         command.Parameters.AddWithValue(
             "input",
@@ -249,7 +257,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         string? resultJson,
         CancellationToken cancellationToken = default
     ) =>
-        ExecuteLeaseGuardedUpdateAsync(
+        RecordTerminalAndWakeAsync(
             """
             status = @status,
                 result = @result,
@@ -286,7 +294,7 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
 
         var status = retryable ? PendingStatus : FailedStatus;
 
-        return ExecuteLeaseGuardedUpdateAsync(
+        return RecordTerminalAndWakeAsync(
             """
             status = @status,
                 visible_at = @visible_at,
@@ -312,6 +320,81 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             leaseToken,
             cancellationToken
         );
+    }
+
+    /// <summary>
+    /// Records a terminal job outcome (success/failure) under the lease guard and, in the same
+    /// transaction, wakes the parent workflow run by pulling its parked <c>visible_at</c> forward to
+    /// now, so a parked workflow resumes on the next worker poll instead of waiting out its
+    /// safety-net grace. The two writes are atomic so a crash can never leave a completed job whose
+    /// parent was never signalled. Every completion wakes (not just the last sibling): for a fan-out
+    /// this can resume-and-re-park a few times until the last sibling lands, which is harmless —
+    /// replay is idempotent and the resume is cheap. Deliberately not gated on "no incomplete
+    /// siblings remain": that check races under concurrent completions (each sees the other as still
+    /// in-flight) and would lose the wake-up. Returns <c>false</c> (writing nothing) when the lease
+    /// was lost.
+    /// </summary>
+    private async ValueTask<bool> RecordTerminalAndWakeAsync(
+        string setClause,
+        Action<NpgsqlParameterCollection> bindSetParameters,
+        Guid jobId,
+        string leaseToken,
+        CancellationToken cancellationToken
+    )
+    {
+        var now = DateTimeOffset.UtcNow;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        var terminalSql = $"""
+            update pw_activity_jobs
+            set {setClause}
+            where job_id = @job_id
+              and lease_token = @lease_token
+              and status = @leased_status;
+            """;
+
+        await using (var command = new NpgsqlCommand(terminalSql, connection, transaction))
+        {
+            bindSetParameters(command.Parameters);
+            command.Parameters.AddWithValue("job_id", jobId);
+            command.Parameters.AddWithValue("lease_token", leaseToken);
+            command.Parameters.AddWithValue("leased_status", LeasedStatus);
+
+            if (await command.ExecuteNonQueryAsync(cancellationToken) == 0)
+            {
+                // Lease lost: another worker reclaimed the job. Write nothing and abandon.
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+
+        // Wake the parent run (if this job belonged to one) by pulling its parked deadline forward.
+        // The visible_at > @now guard only ever pulls the wake earlier, never pushes a deadline out,
+        // and makes this idempotent across concurrent sibling completions. A null/absent run id or a
+        // run that is not currently parked (running, or already runnable) makes this a no-op.
+        const string wakeSql = """
+            update pw_workflow_runs
+            set visible_at = @now,
+                updated_at = @now
+            where workflow_run_id = (select workflow_run_id from pw_activity_jobs where job_id = @job_id)
+              and status = @pending_status
+              and lease_token is null
+              and visible_at > @now;
+            """;
+
+        await using (var command = new NpgsqlCommand(wakeSql, connection, transaction))
+        {
+            command.Parameters.AddWithValue("job_id", jobId);
+            command.Parameters.AddWithValue("now", now);
+            command.Parameters.AddWithValue("pending_status", PendingStatus);
+
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     /// <summary>

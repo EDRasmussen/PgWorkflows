@@ -10,6 +10,7 @@ internal interface IActivityJobStore
         int maxAttempts = 1,
         DateTimeOffset? visibleAt = null,
         string? idempotencyKey = null,
+        Guid? workflowRunId = null,
         CancellationToken cancellationToken = default
     );
 
@@ -38,7 +39,9 @@ internal interface IActivityJobStore
     /// <summary>
     /// Records a successful JSON result. Returns <c>false</c> when the lease is no longer
     /// held (another worker reclaimed the job), in which case nothing was written and
-    /// the caller should abandon.
+    /// the caller should abandon. When the job belongs to a workflow run and it was the last
+    /// incomplete job for that run, the run's parked deadline is pulled forward in the same
+    /// transaction so a waiting workflow resumes promptly.
     /// </summary>
     ValueTask<bool> RecordSuccessAsync(
         Guid jobId,

@@ -366,7 +366,14 @@ public sealed class PgWorkflowsBuilder
         Services.AddSingleton<IWorkflowStore>(provider =>
             provider.GetRequiredService<PostgresWorkflowStore>()
         );
-        Services.AddSingleton<WorkflowRunner>();
+        Services.AddSingleton(provider => new WorkflowRunner(
+            provider.GetRequiredService<IWorkflowStore>(),
+            provider.GetRequiredService<IActivityJobStore>(),
+            provider.GetService<JsonSerializerOptions>()
+        )
+        {
+            ParkGrace = provider.GetRequiredService<WorkflowWorkerOptions>().ParkGrace,
+        });
         Services.AddSingleton<WorkflowWorker>();
         Services.AddSingleton<IPgWorkflowClient>(provider => new PgWorkflowClient(
             provider.GetRequiredService<WorkflowRegistry>(),

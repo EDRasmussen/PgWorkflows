@@ -18,6 +18,15 @@ internal sealed class WorkflowRunner(
 
     public TimeSpan ActivityPollInterval { get; init; } = TimeSpan.FromMilliseconds(100);
 
+    /// <summary>
+    /// Safety-net deadline a leased run is parked for while waiting on activity steps. The run is
+    /// normally woken earlier by the edge-trigger when its last outstanding activity job completes;
+    /// this grace only bounds how long a parked run lingers if that wake is ever missed (e.g. a crash
+    /// between job completion and the wake write). Long enough that idle parked runs are not
+    /// effectively polled, short enough to recover promptly.
+    /// </summary>
+    public TimeSpan ParkGrace { get; init; } = TimeSpan.FromSeconds(30);
+
     internal async ValueTask<Guid> StartAsync(
         string workflowName,
         object? input,
@@ -151,7 +160,7 @@ internal sealed class WorkflowRunner(
             _activityStore,
             _jsonSerializerOptions,
             ActivityPollInterval,
-            canSleep: leaseToken is not null
+            canPark: leaseToken is not null
         );
 
         try
@@ -165,12 +174,14 @@ internal sealed class WorkflowRunner(
 
             if (context.ParkRequested)
             {
-                // ctx.Sleep threw to park the run but the workflow completed anyway, so user code
-                // swallowed the WorkflowSleepException (e.g. a broad try/catch around ctx.Sleep).
-                // Fail loudly instead of silently recording success and skipping the timer.
+                // ctx.Sleep or an activity wait threw to park the run, but the workflow completed
+                // anyway, so user code swallowed the control-flow exception (e.g. a broad try/catch
+                // around ctx.Sleep / ctx.Activity / ctx.WhenAll). Fail loudly instead of silently
+                // recording success and skipping the suspend.
                 throw new InvalidOperationException(
-                    "Workflow completed after ctx.Sleep requested a durable park; its internal "
-                        + "control-flow exception was swallowed. Do not wrap ctx.Sleep in a broad catch."
+                    "Workflow completed after it requested a durable park (ctx.Sleep or an activity "
+                        + "wait); its internal control-flow exception was swallowed. Do not wrap "
+                        + "ctx.Sleep, ctx.Activity, or ctx.WhenAll in a broad catch."
                 );
             }
 
@@ -207,6 +218,18 @@ internal sealed class WorkflowRunner(
                 sleep.TimerSequence,
                 sleep.FireAt,
                 leaseToken!,
+                CancellationToken.None
+            );
+            return null;
+        }
+        catch (WorkflowParkException)
+        {
+            // The run is waiting on outstanding activity steps: release the lease and park until the
+            // edge-trigger wakes it (or ParkGrace elapses as a backstop). Control flow, not failure.
+            await _workflowStore.RecordRunWaitingAsync(
+                workflowRunId,
+                leaseToken!,
+                ParkGrace,
                 CancellationToken.None
             );
             return null;

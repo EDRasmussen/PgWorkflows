@@ -23,8 +23,17 @@ public static class PostgresSchema
         alter table pw_activity_jobs
             add column if not exists idempotency_key text null;
 
+        alter table pw_activity_jobs
+            add column if not exists workflow_run_id uuid null;
+
         create index if not exists ix_pw_activity_jobs_runnable
             on pw_activity_jobs (visible_at)
+            where status in ('pending', 'leased');
+
+        -- Supports the "does this run still have incomplete activity jobs?" probe used to wake a
+        -- parked run exactly once (when its last outstanding job completes).
+        create index if not exists ix_pw_activity_jobs_run_incomplete
+            on pw_activity_jobs (workflow_run_id)
             where status in ('pending', 'leased');
 
         create unique index if not exists ux_pw_activity_jobs_idempotency

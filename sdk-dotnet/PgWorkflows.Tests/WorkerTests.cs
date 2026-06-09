@@ -511,8 +511,9 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             int maxAttempts = 1,
             DateTimeOffset? visibleAt = null,
             string? idempotencyKey = null,
+            Guid? workflowRunId = null,
             CancellationToken cancellationToken = default
-        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, cancellationToken);
+        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
 
         public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
             string workerId,

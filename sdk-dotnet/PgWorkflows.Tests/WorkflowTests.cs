@@ -275,6 +275,8 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
                         WorkerId = "hosted-workflow-worker",
                         BatchSize = 1,
                         PollInterval = TimeSpan.FromMilliseconds(10),
+                        // Short backstop so a rare missed wake recovers within the test timeout.
+                        ParkGrace = TimeSpan.FromSeconds(2),
                     }
                 )
                 .AddActivities<TestActivities>()
@@ -312,6 +314,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -345,6 +350,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var workflowWorker = new WorkflowWorker(
@@ -363,29 +371,209 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
         using var activityWorkerCts = new CancellationTokenSource();
         var activityWorkerRun = activityWorker.RunAsync(activityWorkerCts.Token);
+        using var workflowWorkerCts = new CancellationTokenSource();
+        var workflowWorkerRun = workflowWorker.RunAsync(workflowWorkerCts.Token);
 
         try
         {
-            Assert.Equal(1, await workflowWorker.RunOnceAsync());
-
-            var retryingRun = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
-            Assert.Equal(WorkflowStatus.Pending, retryingRun!.Status);
-            Assert.Equal(1, retryingRun.Attempt);
-            Assert.Equal(2, retryingRun.MaxAttempts);
-            Assert.Equal(1, activities.EchoExecutions);
-
-            Assert.Equal(1, await workflowWorker.RunOnceAsync());
-
+            // The activity parks-and-resumes, then the workflow body fails once (transient) and is
+            // retried; the second attempt succeeds. Drive the continuous workers to terminal rather
+            // than counting worker passes (parking adds resume cycles), then assert the invariants.
+            var succeededRun = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
             var result = await handle.GetResultAsync();
-            var succeededRun = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+
             Assert.Equal("value", result);
-            Assert.Equal(WorkflowStatus.Succeeded, succeededRun!.Status);
+            Assert.Equal(WorkflowStatus.Succeeded, succeededRun.Status);
+            // A real retry happened (attempt 2 of 2): the transient first failure spent an attempt,
+            // while the activity park did not (it gives its attempt back). The activity body ran
+            // exactly once across the retry — its completed step was memoized, not re-executed.
             Assert.Equal(2, succeededRun.Attempt);
+            Assert.Equal(2, succeededRun.MaxAttempts);
             Assert.Equal(1, activities.EchoExecutions);
         }
         finally
         {
+            workflowWorkerCts.Cancel();
             activityWorkerCts.Cancel();
+            await SwallowCancellation(workflowWorkerRun);
+            await SwallowCancellation(activityWorkerRun);
+        }
+    }
+
+    [Fact]
+    public async Task Workflow_releases_its_lease_while_a_leased_activity_runs_then_resumes()
+    {
+        // The core promise of park-and-replay: while a leased run waits on an activity, it holds no
+        // worker lease. We gate the activity so it stays in-flight, then observe the run parked
+        // (Pending, no lease) mid-activity, release it, and confirm it resumes to success exactly once.
+        var activities = new GatedActivities();
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("wf-gated", activities.RunAsync);
+        var activityWorker = new ActivityWorker(registry, Store, Options("activity-worker"));
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<GatedActivityWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var workflowWorker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<GatedActivityWorkflow, string, string>("value");
+
+        using var activityWorkerCts = new CancellationTokenSource();
+        var activityWorkerRun = activityWorker.RunAsync(activityWorkerCts.Token);
+        using var workflowWorkerCts = new CancellationTokenSource();
+        var workflowWorkerRun = workflowWorker.RunAsync(workflowWorkerCts.Token);
+
+        try
+        {
+            // Wait until the activity is actually executing (it then blocks on the gate).
+            await activities.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // While the activity runs, the run must be parked with no lease held — that is the
+            // feature. (The activity is gated, so it cannot complete and race this observation.)
+            var parked = await WaitForWorkflowStatusAsync(
+                handle.WorkflowRunId,
+                WorkflowStatus.Pending,
+                TimeSpan.FromSeconds(10)
+            );
+            Assert.Equal(WorkflowStatus.Pending, parked.Status);
+            Assert.False(await RunLeaseHeldAsync(handle.WorkflowRunId));
+            // The step is still in-flight (not yet memoized): the run genuinely yielded mid-activity.
+            var stepWhileParked = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
+            Assert.Equal(WorkflowStepStatus.Scheduled, stepWhileParked!.Status);
+
+            // Release the activity: completing it wakes the parked run, which resumes to success.
+            activities.Release.SetResult();
+
+            // Wait via the store (handle.GetResultAsync would re-execute inline in this caller and
+            // re-run the activity); read the durable result.
+            var succeeded = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
+            Assert.Equal(WorkflowStatus.Succeeded, succeeded.Status);
+            Assert.Equal(
+                "gated:value",
+                System.Text.Json.JsonSerializer.Deserialize<string>(succeeded.ResultJson!)
+            );
+            Assert.Equal(1, activities.Executions);
+            var step = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
+            Assert.Equal(WorkflowStepStatus.Succeeded, step!.Status);
+        }
+        finally
+        {
+            activities.Release.TrySetResult();
+            workflowWorkerCts.Cancel();
+            activityWorkerCts.Cancel();
+            await SwallowCancellation(workflowWorkerRun);
+            await SwallowCancellation(activityWorkerRun);
+        }
+    }
+
+    [Fact]
+    public async Task Leased_when_all_releases_its_lease_while_fanned_out_activities_run_then_resumes()
+    {
+        // The headline of the feature: a fan-out (ctx.WhenAll) under the workflow worker dispatches
+        // every sibling to the queue, then releases its lease while they run — holding no worker —
+        // and resumes exactly once when the last sibling completes, with each body run a single time.
+        var activities = new GatedFanOutActivities();
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("wf-gated-left", activities.LeftAsync);
+        registry.Register<string, string>("wf-gated-right", activities.RightAsync);
+        var activityWorker = new ActivityWorker(
+            registry,
+            Store,
+            Options("activity-worker") with
+            {
+                BatchSize = 2,
+                MaxConcurrency = 2,
+            }
+        );
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<GatedFanOutWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var workflowWorker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<GatedFanOutWorkflow, string, string>("value");
+
+        using var activityWorkerCts = new CancellationTokenSource();
+        var activityWorkerRun = activityWorker.RunAsync(activityWorkerCts.Token);
+        using var workflowWorkerCts = new CancellationTokenSource();
+        var workflowWorkerRun = workflowWorker.RunAsync(workflowWorkerCts.Token);
+
+        try
+        {
+            // Both siblings are dispatched and running concurrently (then gated).
+            await activities.LeftStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            await activities.RightStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // While the fan-out runs, the run is parked with no lease held — it yielded its worker.
+            var parked = await WaitForWorkflowStatusAsync(
+                handle.WorkflowRunId,
+                WorkflowStatus.Pending,
+                TimeSpan.FromSeconds(10)
+            );
+            Assert.Equal(WorkflowStatus.Pending, parked.Status);
+            Assert.False(await RunLeaseHeldAsync(handle.WorkflowRunId));
+            // Both steps are still in-flight (not yet memoized).
+            var leftWhileParked = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
+            var rightWhileParked = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 1);
+            Assert.Equal(WorkflowStepStatus.Scheduled, leftWhileParked!.Status);
+            Assert.Equal(WorkflowStepStatus.Scheduled, rightWhileParked!.Status);
+
+            // Release both: the last completer wakes the parked run, which resumes and aggregates.
+            activities.Release.SetResult();
+
+            var succeeded = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
+            Assert.Equal(WorkflowStatus.Succeeded, succeeded.Status);
+            Assert.Equal(
+                "L:value R:value",
+                System.Text.Json.JsonSerializer.Deserialize<string>(succeeded.ResultJson!)
+            );
+            // Exactly-once across the park/resume, and both steps durably memoized.
+            Assert.Equal(1, activities.LeftExecutions);
+            Assert.Equal(1, activities.RightExecutions);
+            var leftStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
+            var rightStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 1);
+            Assert.Equal(WorkflowStepStatus.Succeeded, leftStep!.Status);
+            Assert.Equal(WorkflowStepStatus.Succeeded, rightStep!.Status);
+        }
+        finally
+        {
+            activities.Release.TrySetResult();
+            workflowWorkerCts.Cancel();
+            activityWorkerCts.Cancel();
+            await SwallowCancellation(workflowWorkerRun);
             await SwallowCancellation(activityWorkerRun);
         }
     }
@@ -399,6 +587,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -446,6 +637,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var workflowWorker = new WorkflowWorker(
@@ -495,6 +689,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -530,6 +727,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -543,50 +743,58 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
         using var activityWorkerCts = new CancellationTokenSource();
         var activityWorkerRun = activityWorker.RunAsync(activityWorkerCts.Token);
+        using var workflowWorkerCts = new CancellationTokenSource();
+        var workflowWorkerRun = worker.RunAsync(workflowWorkerCts.Token);
 
         try
         {
-            // First lease: runs the pre-sleep activity, hits ctx.Sleep, and parks the run. The
-            // sleep is long (30s) so the "still parked" checks below cannot race a real timer.
-            Assert.Equal(1, await worker.RunOnceAsync());
+            // Drive the continuous workers until the run is durably parked on ctx.Sleep — i.e. its
+            // timer row exists. Note the pre-sleep activity now also parks-and-resumes (every activity
+            // wait parks), so we wait for the durable sleep state rather than counting worker passes.
+            // The sleep is long (30s) so the checks below cannot race a real timer firing.
+            var fireAt = await WaitForWorkflowTimerAsync(
+                handle.WorkflowRunId,
+                0,
+                TimeSpan.FromSeconds(10)
+            );
 
             var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
             Assert.Equal(WorkflowStatus.Pending, parked!.Status);
             Assert.True(parked.VisibleAt > DateTimeOffset.UtcNow);
+            Assert.Equal(parked.VisibleAt, fireAt);
+            // The pre-sleep activity ran exactly once and its step is durably memoized; the post-sleep
+            // activity has not run yet.
             Assert.Equal(1, activities.FirstExecutions);
             Assert.Equal(0, activities.SecondExecutions);
-
-            // The pre-sleep step is durably memoized (this is what makes the resume not re-run it).
             var firstStepAfterPark = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
             Assert.Equal(WorkflowStepStatus.Succeeded, firstStepAfterPark!.Status);
 
-            var fireAt = await WorkflowStore.GetTimerAsync(handle.WorkflowRunId, 0);
-            Assert.NotNull(fireAt);
-            Assert.Equal(parked.VisibleAt, fireAt!.Value);
-
-            // Still parked: the timer has not fired, so there is nothing to lease.
-            Assert.Equal(0, await worker.RunOnceAsync());
-
             // Fire the timer deterministically (no wall-clock wait): move both the timer's fire_at
-            // and the run's visible_at into the past, simulating the deadline elapsing.
+            // and the run's visible_at into the past, simulating the deadline elapsing. The continuous
+            // worker then resumes, replays the cached pre-sleep step, and runs the rest.
             await FireWorkflowTimerAsync(handle.WorkflowRunId, 0);
 
-            // Resume: replays the cached pre-sleep step, passes the elapsed timer, runs the rest.
-            Assert.Equal(1, await worker.RunOnceAsync());
-
-            var result = await handle.GetResultAsync();
-            Assert.Equal("second:first:value", result);
-
-            var succeeded = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
-            Assert.Equal(WorkflowStatus.Succeeded, succeeded!.Status);
-            // End-to-end exactly-once: the pre-sleep activity body ran a single time across the
-            // park/resume (the step memoization above is the mechanism that guarantees it).
+            // Wait via the store (not handle.GetResultAsync, which would re-execute inline in this
+            // caller and cannot Sleep); read the durable result.
+            var succeeded = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
+            Assert.Equal(WorkflowStatus.Succeeded, succeeded.Status);
+            Assert.Equal(
+                "second:first:value",
+                System.Text.Json.JsonSerializer.Deserialize<string>(succeeded.ResultJson!)
+            );
+            // End-to-end exactly-once: each activity body ran a single time across the park/resume
+            // cycles (step memoization is the mechanism that guarantees it).
             Assert.Equal(1, activities.FirstExecutions);
             Assert.Equal(1, activities.SecondExecutions);
         }
         finally
         {
+            workflowWorkerCts.Cancel();
             activityWorkerCts.Cancel();
+            await SwallowCancellation(workflowWorkerRun);
             await SwallowCancellation(activityWorkerRun);
         }
     }
@@ -600,6 +808,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -649,6 +860,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var runner = new WorkflowRunner(WorkflowStore, Store)
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            // Short backstop so any rare missed edge-trigger wake recovers well within test timeouts;
+            // production keeps the longer default. The edge-trigger handles the common case.
+            ParkGrace = TimeSpan.FromSeconds(2),
         };
         var client = new PgWorkflowClient(workflowRegistry, runner, provider);
         var worker = new WorkflowWorker(
@@ -662,6 +876,37 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
         // The workflow catches the park exception and returns normally; the runner must fail the
         // run loudly rather than silently record success and skip the durable timer.
+        Assert.Equal(1, await worker.RunOnceAsync());
+
+        var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Failed, run!.Status);
+        Assert.Contains("swallowed", run.Error);
+    }
+
+    [Fact]
+    public async Task Hosted_workflow_worker_fails_loudly_when_activity_park_is_swallowed()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<SwallowsActivityParkWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
+        var handle = await client.StartAsync<SwallowsActivityParkWorkflow, string, string>("value");
+
+        // No activity worker runs, so the activity stays pending and the run tries to park. The
+        // workflow swallows that control-flow exception and returns normally; the runner must fail
+        // the run loudly rather than silently record success while the step never completed.
         Assert.Equal(1, await worker.RunOnceAsync());
 
         var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
@@ -708,6 +953,59 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
         command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow.Subtract(TimeSpan.FromMinutes(1)));
         await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task<WorkflowRun> WaitForWorkflowStatusAsync(
+        Guid workflowRunId,
+        WorkflowStatus status,
+        TimeSpan timeout
+    )
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            cts.Token.ThrowIfCancellationRequested();
+
+            var run = await WorkflowStore.GetRunAsync(workflowRunId, cts.Token);
+            if (run is not null && run.Status == status)
+            {
+                return run;
+            }
+
+            await Task.Delay(10, cts.Token);
+        }
+    }
+
+    /// <summary>Reads whether a workflow run currently holds a worker lease (lease_token not null).</summary>
+    private async Task<bool> RunLeaseHeldAsync(Guid workflowRunId)
+    {
+        await using var command = DataSource.CreateCommand(
+            "select lease_token from pw_workflow_runs where workflow_run_id = @id;"
+        );
+        command.Parameters.AddWithValue("id", workflowRunId);
+        var leaseToken = await command.ExecuteScalarAsync();
+        return leaseToken is not null and not DBNull;
+    }
+
+    private async Task<DateTimeOffset> WaitForWorkflowTimerAsync(
+        Guid workflowRunId,
+        int timerSequence,
+        TimeSpan timeout
+    )
+    {
+        using var cts = new CancellationTokenSource(timeout);
+        while (true)
+        {
+            cts.Token.ThrowIfCancellationRequested();
+
+            var fireAt = await WorkflowStore.GetTimerAsync(workflowRunId, timerSequence, cts.Token);
+            if (fireAt is not null)
+            {
+                return fireAt.Value;
+            }
+
+            await Task.Delay(10, cts.Token);
+        }
     }
 
     private async Task<WorkflowRun> WaitForWorkflowTerminalAsync(Guid workflowRunId, TimeSpan timeout)
@@ -951,6 +1249,96 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         }
     }
 
+    private sealed class GatedActivities
+    {
+        public int Executions => Volatile.Read(ref _executions);
+
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private int _executions;
+
+        [Activity("wf-gated")]
+        public async ValueTask<string> RunAsync(string value, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _executions);
+            Started.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return $"gated:{value}";
+        }
+    }
+
+    [Workflow]
+    public sealed class GatedActivityWorkflow
+    {
+        [WorkflowRun]
+        public ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        ) => ctx.Activity((GatedActivities a) => a.RunAsync(input, cancellationToken), cancellationToken);
+    }
+
+    private sealed class GatedFanOutActivities
+    {
+        public int LeftExecutions => Volatile.Read(ref _leftExecutions);
+
+        public int RightExecutions => Volatile.Read(ref _rightExecutions);
+
+        public TaskCompletionSource LeftStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource RightStarted { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource Release { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        private int _leftExecutions;
+        private int _rightExecutions;
+
+        [Activity("wf-gated-left")]
+        public async ValueTask<string> LeftAsync(string value, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _leftExecutions);
+            LeftStarted.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return $"L:{value}";
+        }
+
+        [Activity("wf-gated-right")]
+        public async ValueTask<string> RightAsync(string value, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _rightExecutions);
+            RightStarted.TrySetResult();
+            await Release.Task.WaitAsync(cancellationToken);
+            return $"R:{value}";
+        }
+    }
+
+    [Workflow]
+    public sealed class GatedFanOutWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            var (left, right) = await ctx.WhenAll(
+                ctx.CallActivity((GatedFanOutActivities a) => a.LeftAsync(input, cancellationToken)),
+                ctx.CallActivity((GatedFanOutActivities a) => a.RightAsync(input, cancellationToken)),
+                cancellationToken
+            );
+
+            return $"{left} {right}";
+        }
+    }
+
     [Workflow]
     public sealed class SleepWorkflow
     {
@@ -1018,6 +1406,29 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             catch (Exception)
             {
                 // Intentionally swallow the park exception to exercise the fail-loud guard.
+            }
+
+            return input;
+        }
+    }
+
+    [Workflow]
+    public sealed class SwallowsActivityParkWorkflow
+    {
+        [WorkflowRun]
+        public async ValueTask<string> RunAsync(
+            IWorkflowContext ctx,
+            string input,
+            CancellationToken cancellationToken
+        )
+        {
+            try
+            {
+                await ctx.Activity((TestActivities a) => a.Greet(input), cancellationToken);
+            }
+            catch (Exception)
+            {
+                // Intentionally swallow the activity park exception to exercise the fail-loud guard.
             }
 
             return input;

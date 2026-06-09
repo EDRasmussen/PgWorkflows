@@ -57,6 +57,24 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    /// <summary>
+    /// Parks a leased run that is waiting on outstanding activity steps, reusing the
+    /// pending/visible_at machinery and releasing the lease without counting the resume as a failed
+    /// attempt. Unlike <see cref="RecordRunSleepingAsync"/> there is no timer: the run is normally
+    /// woken by the edge-trigger when its last outstanding activity job completes, so it is parked
+    /// only until <paramref name="grace"/> elapses as a safety net against a missed wake. If no
+    /// activity job for the run is still incomplete at park time (the jobs finished during the tiny
+    /// schedule→park window), the run is made immediately runnable instead, closing that race.
+    /// Returns false when the lease was lost (the caller should abandon); in that case nothing is
+    /// written.
+    /// </summary>
+    ValueTask<bool> RecordRunWaitingAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        TimeSpan grace,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask RecordRunFailureAsync(
         Guid workflowRunId,
         string error,

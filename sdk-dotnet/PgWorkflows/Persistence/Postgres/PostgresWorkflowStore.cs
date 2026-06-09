@@ -432,6 +432,58 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return true;
     }
 
+    public async ValueTask<bool> RecordRunWaitingAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        TimeSpan grace,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        var now = DateTimeOffset.UtcNow;
+        var graceDeadline = now + (grace > TimeSpan.Zero ? grace : TimeSpan.Zero);
+
+        // Park the run with a future visible_at (the safety net) only while it still has incomplete
+        // activity jobs; otherwise the jobs finished during the schedule→park window, so make the run
+        // immediately runnable (visible_at = now) rather than waiting out the grace. The edge-trigger
+        // in the activity store will pull visible_at forward to now when the last job completes.
+        const string parkSql = $"""
+            update pw_workflow_runs
+            set status = @pending_status,
+                visible_at = case
+                    when exists (
+                        select 1
+                        from pw_activity_jobs job
+                        where job.workflow_run_id = @workflow_run_id
+                          and job.status in ('pending', 'leased'))
+                    then @grace_deadline
+                    else @now
+                end,
+                attempt = greatest(attempt - 1, 0),
+                updated_at = @now,
+                completed_at = null,
+                result = null,
+                error = null,
+                {LeaseReleaseColumns}
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+              and status = @running_status;
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(parkSql, connection);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("lease_token", leaseToken);
+        command.Parameters.AddWithValue("pending_status", PendingStatus);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("now", now);
+        command.Parameters.AddWithValue("grace_deadline", graceDeadline);
+
+        // One row updated => parked (or made runnable). Zero => lease lost; abandon, write nothing.
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
+
     public async ValueTask<DateTimeOffset?> GetTimerAsync(
         Guid workflowRunId,
         int timerSequence,
