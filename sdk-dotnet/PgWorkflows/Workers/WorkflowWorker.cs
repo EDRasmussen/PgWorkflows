@@ -196,6 +196,14 @@ internal sealed class WorkflowWorker(
         {
             throw;
         }
+        catch (Exception ex) when (TransientErrors.IsTransient(ex))
+        {
+            // The database was unreachable or overloaded; the workflow itself did not fail.
+            // Release the run (rolling back the attempt the lease charged) and rethrow so the
+            // worker loop backs off instead of hammering an exhausted database.
+            await ReleaseRunAfterTransientErrorAsync(leasedRun, ex);
+            throw;
+        }
         catch (Exception ex)
         {
             await RecordWorkflowFailureAsync(leasedRun, ex, runCts.Token);
@@ -205,6 +213,35 @@ internal sealed class WorkflowWorker(
             runCts.Cancel();
             await renewer;
         }
+    }
+
+    private async Task ReleaseRunAfterTransientErrorAsync(LeasedWorkflowRun leasedRun, Exception ex)
+    {
+        var visibleAt = DateTimeOffset.UtcNow.Add(_options.GetRetryDelay(leasedRun.Attempt));
+        var released = await _store.ReleaseRunAsync(
+            leasedRun.WorkflowRunId,
+            leasedRun.LeaseToken,
+            visibleAt,
+            CancellationToken.None
+        );
+
+        if (!released)
+        {
+            _logger?.LogWarning(
+                "Workflow run {WorkflowRunId} ({WorkflowName}) hit a transient infrastructure error but its lease was already lost; another worker will pick it up.",
+                leasedRun.WorkflowRunId,
+                leasedRun.WorkflowName
+            );
+            return;
+        }
+
+        _logger?.LogWarning(
+            ex,
+            "Workflow run {WorkflowRunId} ({WorkflowName}) hit a transient infrastructure error; released for retry at {VisibleAt} without consuming an attempt.",
+            leasedRun.WorkflowRunId,
+            leasedRun.WorkflowName,
+            visibleAt
+        );
     }
 
     private async Task RecordWorkflowFailureAsync(

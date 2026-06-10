@@ -82,3 +82,6 @@ Two worth knowing early:
   are attributable when debugging.
 - Activity `MaxConcurrency` defaults to four per processor (IO-friendly); lower it for
   CPU-bound work.
+- Each process holds its own connection pool, capped at 20 by default. The sum across
+  all API and worker processes must stay below Postgres' `max_connections`; see
+  [connection pooling](/reference/configuration/#connection-pooling).

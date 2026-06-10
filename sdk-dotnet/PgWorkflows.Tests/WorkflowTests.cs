@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Npgsql;
 using PgWorkflows.Activities;
 using PgWorkflows.Workers;
 using PgWorkflows.Workflows;
@@ -415,6 +416,43 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         Assert.Equal(WorkflowStatus.Failed, run!.Status);
         Assert.Contains("boom world", run.Error);
         Assert.Equal(0, await worker.RunOnceAsync());
+    }
+
+    [Fact]
+    public async Task Workflow_worker_releases_run_after_transient_infrastructure_error_without_consuming_an_attempt()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<TransientInfrastructureFailureWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions() with { GetRetryDelay = _ => TimeSpan.Zero }
+        );
+        TransientInfrastructureFailureWorkflow.Reset();
+        var handle = await client.StartAsync<TransientInfrastructureFailureWorkflow, string, string>(
+            "world"
+        );
+
+        // The transient error is rethrown so the worker loop backs off, but the run itself is
+        // released back to pending rather than failed.
+        await Assert.ThrowsAsync<AggregateException>(async () => await worker.RunOnceAsync());
+
+        var released = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, released!.Status);
+        Assert.Equal(0, released.Attempt);
+        Assert.Null(released.Error);
+
+        // MaxAttempts is 1; this retry only exists because the release rolled the attempt back.
+        Assert.Equal(1, await worker.RunOnceAsync());
+        Assert.Equal("hello world", await handle.GetResultAsync());
     }
 
     [Fact]
@@ -1927,6 +1965,30 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         [WorkflowRun]
         public string Run(IWorkflowContext _, string name) =>
             throw new InvalidOperationException($"boom {name}");
+    }
+
+    [Workflow]
+    public sealed class TransientInfrastructureFailureWorkflow
+    {
+        private static int s_invocations;
+
+        public static void Reset() => Volatile.Write(ref s_invocations, 0);
+
+        [WorkflowRun]
+        public string Run(IWorkflowContext _, string name)
+        {
+            if (Interlocked.Increment(ref s_invocations) == 1)
+            {
+                throw new PostgresException(
+                    "sorry, too many clients already",
+                    "FATAL",
+                    "FATAL",
+                    "53300"
+                );
+            }
+
+            return $"hello {name}";
+        }
     }
 
     [Workflow]

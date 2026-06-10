@@ -13,11 +13,35 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
     }
 
+    /// <summary>
+    /// Stable advisory lock key serializing schema creation. Every process in the fleet runs
+    /// <see cref="EnsureSchemaAsync"/> at startup; concurrent "if not exists" DDL takes
+    /// conflicting table locks in varying orders and deadlocks Postgres, crashing workers that
+    /// start simultaneously. With the lock, one process applies the script and the rest wait,
+    /// then re-run it as a no-op.
+    /// </summary>
+    private const long SchemaAdvisoryLockKey = 0x7067_776f_726b_666c; // "pgworkfl"
+
     public async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(PostgresSchema.Sql, connection);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (
+            var lockCommand = new NpgsqlCommand(
+                "select pg_advisory_xact_lock(@key);",
+                connection,
+                transaction
+            )
+        )
+        {
+            lockCommand.Parameters.AddWithValue("key", SchemaAdvisoryLockKey);
+            await lockCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var command = new NpgsqlCommand(PostgresSchema.Sql, connection, transaction);
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async ValueTask<Guid> EnqueueAsync(

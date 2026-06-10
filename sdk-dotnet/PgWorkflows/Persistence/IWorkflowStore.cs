@@ -29,6 +29,21 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
+    /// <summary>
+    /// Releases a leased run back to pending without recording a failure, rolling back the
+    /// attempt the lease charged. Used when execution was stopped by a transient infrastructure
+    /// error (connection exhaustion, network drop): the workflow did not fail, the worker just
+    /// could not reach the database, so the retry must not burn an attempt. The run becomes
+    /// visible again at <paramref name="visibleAt"/>. Returns false when the lease was lost; in
+    /// that case nothing is written.
+    /// </summary>
+    ValueTask<bool> ReleaseRunAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        DateTimeOffset visibleAt,
+        CancellationToken cancellationToken = default
+    );
+
     ValueTask RecordRunSuccessAsync(
         Guid workflowRunId,
         string? resultJson,

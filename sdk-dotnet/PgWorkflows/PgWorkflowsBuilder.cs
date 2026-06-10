@@ -39,11 +39,43 @@ public sealed class PgWorkflowsBuilder
 
     internal WorkflowWorkerOptions WorkflowWorkerOptions { get; private set; } = new();
 
-    public PgWorkflowsBuilder UsePostgres(string connectionString, bool ensureSchemaOnStart = true)
+    /// <summary>
+    /// Per-process connection pool cap applied when neither <c>maxPoolSize</c> nor the connection
+    /// string says otherwise. Npgsql's own default of 100 equals Postgres' default
+    /// <c>max_connections</c>, so a handful of API and worker processes sharing one database can
+    /// exhaust it under load; 20 keeps a typical fleet comfortably below the limit.
+    /// </summary>
+    internal const int DefaultMaxPoolSize = 20;
+
+    /// <param name="maxPoolSize">
+    /// Maximum number of pooled connections this process opens. When null, a
+    /// <c>Maximum Pool Size</c> from the connection string is respected, and
+    /// <see cref="DefaultMaxPoolSize"/> applies if the connection string does not set one.
+    /// </param>
+    public PgWorkflowsBuilder UsePostgres(
+        string connectionString,
+        bool ensureSchemaOnStart = true,
+        int? maxPoolSize = null
+    )
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
-        Services.AddSingleton(_ => NpgsqlDataSource.Create(connectionString));
+        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(connectionString);
+        if (maxPoolSize is { } explicitMaxPoolSize)
+        {
+            connectionStringBuilder.MaxPoolSize = explicitMaxPoolSize;
+        }
+        else if (
+            !connectionStringBuilder
+                .Keys.Cast<string>()
+                .Contains("Maximum Pool Size", StringComparer.OrdinalIgnoreCase)
+        )
+        {
+            connectionStringBuilder.MaxPoolSize = DefaultMaxPoolSize;
+        }
+
+        var effectiveConnectionString = connectionStringBuilder.ConnectionString;
+        Services.AddSingleton(_ => NpgsqlDataSource.Create(effectiveConnectionString));
         AddPostgresStore(ensureSchemaOnStart);
         return this;
     }
