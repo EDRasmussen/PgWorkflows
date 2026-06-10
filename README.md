@@ -2,9 +2,9 @@
 
 Durable workflows built on PostgreSQL.
 
-PgWorkflows lets you build long-running, scalable, durable workflows on top of the Postgres
-database you already run. You don't need to host a separate workflow server or adopt a vendor
-ecosystem; a connection string is enough.
+PgWorkflows lets you build long-running, scalable, durable workflows on top of the Postgres database
+you already run. You don't need to host a separate workflow server or adopt a vendor ecosystem; a
+connection string is enough.
 
 📖 **Docs:** [pgworkflows.emildr.dk](https://pgworkflows.emildr.dk)
 
@@ -123,10 +123,23 @@ public sealed class TrialOnboardingWorkflow
 }
 ```
 
+## Example project
+
+The repository contains a runnable [example project](example/) that shows a simplified recommended
+production topology: an ASP.NET API acting as a pure client and three worker instances competing for
+runs, with the workflows shared through a class library. Start everything, including Postgres, with
+a single command from the repo root:
+
+```sh
+docker compose up -d --build
+```
+
+Then open <http://localhost:8080/scalar> to fire a workflow and watch the workers pick it up.
+
 ## Learn more
 
-- [Get started](https://pgworkflows.emildr.dk/get-started/) walks you through your first workflow
-  in about five minutes
+- [Get started](https://pgworkflows.emildr.dk/get-started/) walks you through your first workflow in
+  about five minutes
 - [How it works](https://pgworkflows.emildr.dk/how-it-works/) explains the mental model under the
   hood
 - [Fan-in fan-out](https://pgworkflows.emildr.dk/fan-in-fan-out/),
