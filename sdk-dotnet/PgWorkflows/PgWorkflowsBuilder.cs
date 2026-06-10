@@ -33,6 +33,8 @@ public sealed class PgWorkflowsBuilder
 
     internal bool EnsurePostgresSchemaOnStart { get; private set; }
 
+    internal bool RunWorkers { get; private set; } = true;
+
     internal ActivityWorkerOptions ActivityWorkerOptions { get; private set; } = new();
 
     internal WorkflowWorkerOptions WorkflowWorkerOptions { get; private set; } = new();
@@ -55,6 +57,18 @@ public sealed class PgWorkflowsBuilder
 
         Services.AddSingleton(dataSource);
         AddPostgresStore(ensureSchemaOnStart);
+        return this;
+    }
+
+    /// <summary>
+    /// Makes this registration client-only: the process can start, signal, and await workflows
+    /// through <see cref="IPgWorkflowClient"/>, but runs no background workers — started runs are
+    /// executed by other processes pointed at the same database. Use this in a front-facing API
+    /// that dispatches work to a separately scaled worker fleet.
+    /// </summary>
+    public PgWorkflowsBuilder DisableWorkers()
+    {
+        RunWorkers = false;
         return this;
     }
 

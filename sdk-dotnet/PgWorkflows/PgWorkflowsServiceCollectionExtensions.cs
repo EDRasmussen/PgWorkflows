@@ -25,15 +25,18 @@ public static class PgWorkflowsServiceCollectionExtensions
         services.AddSingleton(workflowRegistry);
         services.AddSingleton(builder.ActivityWorkerOptions);
         services.AddSingleton(builder.WorkflowWorkerOptions);
-        services.AddSingleton<ActivityWorker>();
+        if (builder.RunWorkers)
+        {
+            services.AddSingleton<ActivityWorker>();
+        }
         services.AddSingleton<IHostedService>(provider =>
         {
             builder.ApplyDeferredRegistrations(provider);
 
             return new PgWorkflowsHostedService(
-                provider.GetRequiredService<ActivityWorker>(),
+                builder.RunWorkers ? provider.GetRequiredService<ActivityWorker>() : null,
                 provider.GetRequiredService<IActivityJobStore>(),
-                provider.GetService<WorkflowWorker>(),
+                builder.RunWorkers ? provider.GetService<WorkflowWorker>() : null,
                 builder.EnsurePostgresSchemaOnStart
             );
         });

@@ -306,6 +306,86 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     }
 
     [Fact]
+    public async Task Client_only_process_dispatches_workflow_to_separate_worker_process()
+    {
+        var activities = new TestActivities();
+
+        var clientServices = new ServiceCollection();
+        clientServices.AddPgWorkflows(pg =>
+            pg.UsePostgres(DataSource, ensureSchemaOnStart: false)
+                .DisableWorkers()
+                .AddWorkflow<ClientGreetingWorkflow>()
+        );
+
+        var workerServices = new ServiceCollection();
+        workerServices.AddSingleton(activities);
+        workerServices.AddPgWorkflows(pg =>
+            pg.UsePostgres(DataSource, ensureSchemaOnStart: false)
+                .ConfigureActivityWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-activity-worker",
+                        BatchSize = 1,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                    }
+                )
+                .ConfigureWorkflowWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-workflow-worker",
+                        BatchSize = 1,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                        // Short backstop so a rare missed wake recovers within the test timeout.
+                        ParkGrace = TimeSpan.FromSeconds(2),
+                    }
+                )
+                .AddActivities<TestActivities>()
+                .AddWorkflow<ClientGreetingWorkflow>()
+        );
+
+        await using var clientProvider = clientServices.BuildServiceProvider();
+        await using var workerProvider = workerServices.BuildServiceProvider();
+
+        var clientHosted = Assert.Single(clientProvider.GetServices<IHostedService>());
+        var workerHosted = Assert.Single(workerProvider.GetServices<IHostedService>());
+        await clientHosted.StartAsync(CancellationToken.None);
+
+        try
+        {
+            var client = clientProvider.GetRequiredService<IPgWorkflowClient>();
+            var handle = await client.StartAsync<ClientGreetingWorkflow, string, string>("world");
+
+            // Only the client-only host is running, so nothing can process the run.
+            await Task.Delay(200);
+            var pendingRun = await WorkflowStore.GetRunAsync(
+                handle.WorkflowRunId,
+                CancellationToken.None
+            );
+            Assert.NotNull(pendingRun);
+            Assert.Equal(WorkflowStatus.Pending, pendingRun.Status);
+            Assert.Equal(0, activities.GreetExecutions);
+
+            await workerHosted.StartAsync(CancellationToken.None);
+
+            var run = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
+            var result = await handle.GetResultAsync();
+
+            Assert.Equal(WorkflowStatus.Succeeded, run.Status);
+            Assert.Equal("HELLO WORLD", result);
+            Assert.Equal(1, activities.GreetExecutions);
+            Assert.Equal(1, activities.UppercaseExecutions);
+        }
+        finally
+        {
+            await workerHosted.StopAsync(CancellationToken.None);
+            await clientHosted.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Hosted_workflow_worker_treats_recorded_workflow_failure_as_processed()
     {
         var workflowRegistry = new WorkflowRegistry();

@@ -6,13 +6,13 @@ using PgWorkflows.Workers;
 namespace PgWorkflows;
 
 internal sealed class PgWorkflowsHostedService(
-    ActivityWorker worker,
+    ActivityWorker? worker,
     IActivityJobStore store,
     WorkflowWorker? workflowWorker,
     bool ensurePostgresSchemaOnStart
 ) : IHostedService
 {
-    private readonly ActivityWorker _worker = worker ?? throw new ArgumentNullException(nameof(worker));
+    private readonly ActivityWorker? _worker = worker;
     private readonly IActivityJobStore _store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly WorkflowWorker? _workflowWorker = workflowWorker;
     private readonly bool _ensurePostgresSchemaOnStart = ensurePostgresSchemaOnStart;
@@ -28,10 +28,10 @@ internal sealed class PgWorkflowsHostedService(
         }
 
         _stopping = new CancellationTokenSource();
-        _activityRunTask = _worker.RunAsync(_stopping.Token);
+        _activityRunTask = _worker?.RunAsync(_stopping.Token);
         _workflowRunTask = _workflowWorker?.RunAsync(_stopping.Token);
 
-        if (_activityRunTask.IsCompleted)
+        if (_activityRunTask is { IsCompleted: true })
         {
             await _activityRunTask;
         }
@@ -44,7 +44,7 @@ internal sealed class PgWorkflowsHostedService(
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
-        if (_activityRunTask is null || _stopping is null)
+        if (_stopping is null)
         {
             return;
         }
@@ -53,10 +53,11 @@ internal sealed class PgWorkflowsHostedService(
 
         try
         {
-            Task[] tasks = _workflowRunTask is null
-                ? [_activityRunTask]
-                : [_activityRunTask, _workflowRunTask];
-            await Task.WhenAll(tasks).WaitAsync(cancellationToken);
+            Task[] tasks = [.. new[] { _activityRunTask, _workflowRunTask }.OfType<Task>()];
+            if (tasks.Length > 0)
+            {
+                await Task.WhenAll(tasks).WaitAsync(cancellationToken);
+            }
         }
         finally
         {

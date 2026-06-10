@@ -1,39 +1,39 @@
 ---
 title: PgWorkflows - Durable workflows built on PostgreSQL
-description: Get started building your docs site with Starlight.
-hero:
-  tagline: Embrace simplicity and manage less infrastructure!
-  image:
-    file: ../../assets/houston.webp
-  actions:
-    - text: Get Started
-      link: /guides/get-started/
-      icon: right-arrow
-    - text: Read the Starlight docs
-      link: https://starlight.astro.build
-      icon: external
-      variant: minimal
+description: Build scalable durable workflows without the infrastructure headache.
 ---
 
-import { Card, CardGrid } from '@astrojs/starlight/components';
+import { Card, CardGrid, Code } from "@astrojs/starlight/components";
+import exampleCode from "./example.cs?raw";
+
+## Why PgWorkflows
+
+PgWorkflows allows you to create durable workflows with your existing architecture. There is no
+longer a need to host additional software or buy into a specific ecosystem to create long-running
+scalable durable workflows.
+
+## Example
+
+PgWorkflows is easy to use and feature rich. It supports workflow orchestration such as fan-in
+fan-out, sleep, signals, and much more.
+
+<Code code={exampleCode} lang="csharp" title="example.cs" />
 
 ## Next steps
 
+Excited to get started? Check out the following resources to learn more about PgWorkflows and how to
+easily use it for your projects.
+
 <CardGrid stagger>
-	<Card title="Update content" icon="pencil">
-		Edit `src/content/docs/index.mdx` to see this page change.
-	</Card>
-	<Card title="Change page layout" icon="document">
-		Delete `template: splash` in `src/content/docs/index.mdx` to display a
-		sidebar on this page.
-	</Card>
-	<Card title="Add new content" icon="add-document">
-		Add Markdown or MDX files to `src/content/docs` to create new pages.
-	</Card>
-	<Card title="Configure your site" icon="setting">
-		Edit your `sidebar` and other config in `astro.config.mjs`.
-	</Card>
-	<Card title="Read the docs" icon="open-book">
-		Learn more in [the Starlight Docs](https://starlight.astro.build/).
-	</Card>
+  <Card title="Get started" icon="pencil">
+    Go to our [get started](/get-started) page to create your very first workflow!
+  </Card>
+  <Card title="Nice to know" icon="document">
+    Check out [how PgWorkflows works](/how-it-works) under the hood and understand the mental
+    model.
+  </Card>
+  <Card title="Features" icon="add-document">
+    Discover PgWorkflows' features such as [sleep](/sleep), [fan-in
+    fan-out](/fan-in-fan-out) and [signals](/signals)
+  </Card>
 </CardGrid>
