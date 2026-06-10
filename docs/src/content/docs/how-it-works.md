@@ -1,11 +1,11 @@
 ---
 title: How it works
-description: The mental model behind PgWorkflows — durable steps, leases, and parked runs, all in Postgres tables.
+description: The mental model behind PgWorkflows. Durable steps, leases, and parked runs, all in Postgres tables.
 ---
 
 PgWorkflows turns ordinary async C# methods into durable workflows by persisting every
-step's outcome in Postgres. No separate server, no event-history replay rules — just
-your app and a handful of tables.
+step's outcome in Postgres. There is no separate server and there are no event-history
+replay rules to learn. Your app and a handful of tables do all the work.
 
 ## The mental model
 
@@ -15,7 +15,7 @@ your app and a handful of tables.
 
 ## Durable steps
 
-<!-- TODO: explain step memoization — each ctx.Activity / ctx.Sleep / ctx.WaitForSignal
+<!-- TODO: explain step memoization: each ctx.Activity / ctx.Sleep / ctx.WaitForSignal
      is keyed per run, results are persisted, side effects happen exactly once. -->
 
 ## Workers and leases
@@ -26,7 +26,7 @@ your app and a handful of tables.
 
 ## Parked runs
 
-<!-- TODO: Sleep and WaitForSignal don't hold a thread or a worker slot — the run is
+<!-- TODO: Sleep and WaitForSignal don't hold a thread or a worker slot; the run is
      parked in the database and woken by a timer or signal, surviving restarts and
      deploys. Note the caveat: parking works via an internal control-flow exception, so
      don't wrap ctx.Sleep / ctx.WaitForSignal in a broad catch. -->

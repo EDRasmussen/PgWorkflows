@@ -3,13 +3,13 @@ title: Error handling & compensation
 description: Retries, failure policies, and saga-style compensation with ctx.OnFailure.
 ---
 
-Activities fail — networks blip, label printers go offline. PgWorkflows retries
+Activities fail: networks blip, label printers go offline. PgWorkflows retries
 activities for you, and when a workflow fails permanently partway through, `ctx.OnFailure`
 runs the compensations you registered, in reverse, so completed side effects get undone.
 
 ## Activity retries
 
-<!-- TODO: attempts and backoff — MaxAttempts and GetRetryDelay on the worker options;
+<!-- TODO: attempts and backoff: MaxAttempts and GetRetryDelay on the worker options;
      what counts as a retryable failure; what happens when retries are exhausted. -->
 
 ## Compensation with `ctx.OnFailure`
@@ -51,5 +51,5 @@ await ctx.Activity(
 
 ## Workflow failure
 
-<!-- TODO: what the caller sees — GetResultAsync / ExecuteAsync throwing with the
+<!-- TODO: what the caller sees: GetResultAsync / ExecuteAsync throwing with the
      failure; where the failure is recorded in Postgres. -->

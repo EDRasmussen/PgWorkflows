@@ -1,6 +1,6 @@
 ---
 title: Signals
-description: Deliver external events into a running workflow — approvals, webhooks, user actions.
+description: Deliver external events into a running workflow, such as approvals, webhooks, and user actions.
 ---
 
 Signals let the outside world talk to a running workflow: a human approval, a webhook,

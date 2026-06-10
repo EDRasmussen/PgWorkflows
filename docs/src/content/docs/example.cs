@@ -15,7 +15,7 @@ public sealed class TrialOnboardingWorkflow
             cancellationToken
         );
 
-        // Durable timer: the run is parked in Postgres — it survives
+        // Durable timer: the run is parked in Postgres. It survives
         // restarts and deploys, and no worker holds it in memory.
         await ctx.Sleep(TimeSpan.FromDays(11), cancellationToken);
 

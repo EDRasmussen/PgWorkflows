@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="../sdk-dotnet/PgWorkflows/PgWorkflows.csproj" />
+  <Project Path="Example.Workflows/Example.Workflows.csproj" />
+  <Project Path="Example.Api/Example.Api.csproj" />
+  <Project Path="Example.Worker/Example.Worker.csproj" />
+</Solution>

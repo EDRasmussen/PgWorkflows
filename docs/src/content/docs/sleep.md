@@ -1,11 +1,11 @@
 ---
 title: Sleep
-description: Durable timers — pause a workflow for minutes or months without holding a worker.
+description: Durable timers that pause a workflow for minutes or months without holding a worker.
 ---
 
-`ctx.Sleep` pauses a workflow for any duration — seconds or weeks. The run is parked in
+`ctx.Sleep` pauses a workflow for any duration, from seconds to weeks. The run is parked in
 Postgres and resumed by a worker when the timer fires, so it survives restarts, deploys,
-and crashes. No thread, no worker slot, no memory is held while it sleeps.
+and crashes. A sleeping workflow does not hold a thread, a worker slot, or any memory.
 
 ## Usage
 
@@ -21,13 +21,13 @@ await ctx.Activity((EmailActivities a) => a.SendTrialEndingReminder(input.Email)
 
 <!-- TODO: the run's visible_at is pushed into the future and its lease released; the
      workflow worker picks it back up when the timer fires. The deadline is persisted on
-     first encounter, so it stays stable across replays — resuming doesn't restart the
+     first encounter, so it stays stable across replays; resuming doesn't restart the
      clock. -->
 
 ## Caveats
 
 <!-- TODO, from the API docs:
-     - Parking is implemented via an internal control-flow exception — don't wrap
+     - Parking is implemented via an internal control-flow exception, so don't wrap
        ctx.Sleep in a broad catch, or the park is swallowed (the run then fails loudly
        rather than silently skipping the timer).
      - Sleeping requires the hosted workflow worker (the AddPgWorkflows default); it

@@ -1,6 +1,6 @@
 ---
 title: PgWorkflows - Durable workflows built on PostgreSQL
-description: Build scalable durable workflows without the infrastructure headache.
+description: Build scalable durable workflows on the Postgres database you already run.
 ---
 
 import { Card, CardGrid, Code } from "@astrojs/starlight/components";
@@ -8,32 +8,29 @@ import exampleCode from "./example.cs?raw";
 
 ## Why PgWorkflows
 
-PgWorkflows allows you to create durable workflows with your existing architecture. There is no
-longer a need to host additional software or buy into a specific ecosystem to create long-running
-scalable durable workflows.
+PgWorkflows lets you build long-running, scalable, durable workflows with the architecture you
+already have. You don't need to host additional software or adopt a separate ecosystem; Postgres
+handles the durability.
 
 ## Example
 
-PgWorkflows is easy to use and feature rich. It supports workflow orchestration such as fan-in
-fan-out, sleep, signals, and much more.
+PgWorkflows supports the orchestration patterns you'd expect, including fan-in fan-out, durable
+sleep, and signals.
 
 <Code code={exampleCode} lang="csharp" title="example.cs" />
 
 ## Next steps
 
-Excited to get started? Check out the following resources to learn more about PgWorkflows and how to
-easily use it for your projects.
+The following resources cover how PgWorkflows works and how to use it in your projects.
 
 <CardGrid stagger>
   <Card title="Get started" icon="pencil">
-    Go to our [get started](/get-started) page to create your very first workflow!
+    Follow the [get started](/get-started) guide to create your first workflow.
   </Card>
   <Card title="Nice to know" icon="document">
-    Check out [how PgWorkflows works](/how-it-works) under the hood and understand the mental
-    model.
+    Read [how PgWorkflows works](/how-it-works) to understand the mental model under the hood.
   </Card>
   <Card title="Features" icon="add-document">
-    Discover PgWorkflows' features such as [sleep](/sleep), [fan-in
-    fan-out](/fan-in-fan-out) and [signals](/signals)
+    Learn about [sleep](/sleep), [fan-in fan-out](/fan-in-fan-out), and [signals](/signals).
   </Card>
 </CardGrid>

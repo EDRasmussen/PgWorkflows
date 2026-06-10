@@ -3,12 +3,12 @@ title: Get started
 description: Install PgWorkflows, define your first workflow, and run it against your existing Postgres.
 ---
 
-Get a durable workflow running in about five minutes, using nothing but your app and a
-Postgres connection string.
+Get a durable workflow running in about five minutes, using your app and a Postgres
+connection string.
 
 ## Prerequisites
 
-<!-- TODO: .NET version, a reachable Postgres instance (any flavor — local, RDS, Supabase, ...). -->
+<!-- TODO: .NET version, a reachable Postgres instance (any flavor: local, RDS, Supabase, ...). -->
 
 ## Install
 
@@ -31,7 +31,7 @@ builder.Services.AddPgWorkflows(pg =>
 );
 ```
 
-<!-- TODO: mention ensureSchemaOnStart — the schema is created automatically on startup by default. -->
+<!-- TODO: mention ensureSchemaOnStart: the schema is created automatically on startup by default. -->
 
 ## Define a workflow and its activities
 

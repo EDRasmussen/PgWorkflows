@@ -4,7 +4,7 @@ description: Define workflows as plain C# classes and put side effects in activi
 ---
 
 Workflows orchestrate; activities do. The workflow method describes the durable control
-flow, while every side effect — HTTP calls, emails, database writes — lives in an
+flow, while every side effect (HTTP calls, emails, database writes) lives in an
 activity so it can be retried and recorded exactly once.
 
 ## Defining a workflow

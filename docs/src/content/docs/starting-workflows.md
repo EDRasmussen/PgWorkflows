@@ -1,6 +1,6 @@
 ---
 title: Starting workflows
-description: Use IPgWorkflowClient to start, await, and signal workflow runs — with idempotency built in.
+description: Use IPgWorkflowClient to start, await, and signal workflow runs, with idempotency built in.
 ---
 
 `IPgWorkflowClient` is how your application code talks to PgWorkflows: start a run and
@@ -30,7 +30,7 @@ Console.WriteLine(handle.WorkflowRunId);
 var result = await handle.GetResultAsync();
 ```
 
-<!-- TODO: what the handle offers — WorkflowRunId, GetResultAsync, SignalAsync — and how
+<!-- TODO: what the handle offers (WorkflowRunId, GetResultAsync, SignalAsync) and how
      to signal a run from another process via the client + run id. -->
 
 ## Idempotency keys
@@ -44,5 +44,5 @@ var handle = await workflows.StartAsync<TrialOnboardingWorkflow, SignupInput, st
 );
 ```
 
-<!-- TODO: semantics — same key returns the existing run instead of creating a new one;
+<!-- TODO: semantics: same key returns the existing run instead of creating a new one;
      scope/uniqueness of keys; keys on SignalAsync too. -->

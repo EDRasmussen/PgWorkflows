@@ -7,19 +7,20 @@ Every process that calls `AddPgWorkflows` is a worker. Call `DisableWorkers()` a
 a client. That's the whole model.
 
 - A **worker** leases and executes workflows and activities.
-- A **client** starts, signals, and awaits workflows — and never executes anything.
+- A **client** starts, signals, and awaits workflows, and never executes anything.
 
-Postgres is the only coordination layer. No scheduler service, no leader election, no
-message broker.
+Postgres is the only coordination layer. There is no scheduler service, leader
+election, or message broker.
 
 :::note[Coming from Temporal?]
-Same scaling model — run as many workers as you like — minus the server cluster.
+The scaling model is the same: run as many workers as you like. There is just no
+server cluster to operate.
 :::
 
 ## Workers
 
 There is no worker setup. `AddPgWorkflows` registers a hosted background worker, so the
-app that defines your workflows processes them — an ASP.NET API, a console app, and a
+app that defines your workflows processes them. An ASP.NET API, a console app, and a
 Windows service are all equally valid workers.
 
 ```csharp
@@ -35,14 +36,15 @@ To scale, deploy more instances. Leases in Postgres make this safe:
 - Two workers never run the same step (`FOR UPDATE SKIP LOCKED`).
 - Leases are heartbeated while work runs, so slow work isn't stolen.
 - A dead worker's lease expires; a peer resumes the run from the last completed step.
-- A worker that lost its lease has its writes rejected — no stale-worker corruption.
+- A worker that lost its lease has its writes rejected, so a stale worker can't
+  corrupt state.
 
 ## Clients
 
-A front-facing API shouldn't compete for work — it should dispatch and move on.
+A front-facing API shouldn't compete for work. It should dispatch and move on.
 
 ```csharp
-// API — pure client, runs no workers
+// API: pure client, runs no workers
 builder.Services.AddPgWorkflows(pg =>
     pg.UsePostgres(connectionString)
         .DisableWorkers()
@@ -50,12 +52,12 @@ builder.Services.AddPgWorkflows(pg =>
 );
 ```
 
-Starting a workflow is a single `INSERT` — cheap enough for your hottest request path.
+Starting a workflow is a single `INSERT`, cheap enough for your hottest request path.
 Whichever worker leases the run first executes it.
 
 For high-throughput APIs, prefer fire-and-forget: `StartAsync`, return the run id, let
-callers check back. Awaiting `GetResultAsync` per request polls the database — fine for
-tens of waiters, not a million.
+callers check back. Awaiting `GetResultAsync` per request polls the database, which is
+fine for tens of waiters but not a million.
 
 ## Sharing definitions
 
@@ -68,15 +70,15 @@ MyApp.Api/         ← client: AddWorkflow + DisableWorkers
 MyApp.Worker/      ← worker: AddWorkflow + AddActivities
 ```
 
-Clients need `AddWorkflow` (to resolve names and types) but can skip `AddActivities` —
-activities only matter where they execute.
+Clients need `AddWorkflow` (to resolve names and types) but can skip `AddActivities`,
+since activities only matter where they execute.
 
 ## Tuning
 
 All knobs and defaults are in the [configuration reference](/reference/configuration/).
 Two worth knowing early:
 
-- `WorkerId` defaults to the machine name — set it explicitly in containers so leases
+- `WorkerId` defaults to the machine name; set it explicitly in containers so leases
   are attributable when debugging.
 - Activity `MaxConcurrency` defaults to four per processor (IO-friendly); lower it for
   CPU-bound work.

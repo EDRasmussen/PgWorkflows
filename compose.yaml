@@ -1,3 +1,14 @@
+x-example-worker: &example-worker
+  build:
+    context: .
+    dockerfile: example/Example.Worker/Dockerfile
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+x-example-worker-env: &example-worker-env
+  PGWORKFLOWS_CONNECTION_STRING: Host=postgres;Port=5432;Database=pgworkflows;Username=postgres;Password=postgres
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,6 +26,40 @@ services:
       retries: 12
     volumes:
       - pgworkflows-postgres-data:/var/lib/postgresql/data
+
+  example-api:
+    build:
+      context: .
+      dockerfile: example/Example.Api/Dockerfile
+    container_name: pgworkflows-example-api
+    environment:
+      PGWORKFLOWS_CONNECTION_STRING: Host=postgres;Port=5432;Database=pgworkflows;Username=postgres;Password=postgres
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  example-worker-1:
+    <<: *example-worker
+    container_name: pgworkflows-example-worker-1
+    environment:
+      <<: *example-worker-env
+      PGWORKFLOWS_WORKER_ID: worker-1
+
+  example-worker-2:
+    <<: *example-worker
+    container_name: pgworkflows-example-worker-2
+    environment:
+      <<: *example-worker-env
+      PGWORKFLOWS_WORKER_ID: worker-2
+
+  example-worker-3:
+    <<: *example-worker
+    container_name: pgworkflows-example-worker-3
+    environment:
+      <<: *example-worker-env
+      PGWORKFLOWS_WORKER_ID: worker-3
 
 volumes:
   pgworkflows-postgres-data:

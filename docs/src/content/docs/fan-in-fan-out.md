@@ -4,7 +4,7 @@ description: Run activities in parallel with ctx.WhenAll and gather their result
 ---
 
 `ctx.WhenAll` runs several activities concurrently and resumes the workflow once all of
-them have completed — and like every step, the fan-out is durable: a crash mid-flight
+them have completed. Like every step, the fan-out is durable: a crash mid-flight
 resumes cleanly without re-running finished branches.
 
 ## Parallel activities with typed results
@@ -37,7 +37,7 @@ var results = await ctx.WhenAll(
 
 ## What happens on failure?
 
-<!-- TODO: semantics when one branch fails — what happens to the others, how retries
+<!-- TODO: semantics when one branch fails: what happens to the others, how retries
      interact with WhenAll. -->
 
 ## How it stays durable
