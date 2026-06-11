@@ -14,8 +14,6 @@ internal sealed class WorkflowWorker(
     ILogger<WorkflowWorker>? logger = null
 )
 {
-    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
-
     private readonly WorkflowRegistry _registry =
         registry ?? throw new ArgumentNullException(nameof(registry));
     private readonly IWorkflowStore _store =
@@ -55,29 +53,45 @@ internal sealed class WorkflowWorker(
         );
 
         var errors = new ConcurrentBag<Exception>();
-        await Parallel.ForEachAsync(
-            leasedRuns,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = Math.Max(_options.MaxConcurrency, 1),
-                CancellationToken = cancellationToken,
-            },
-            async (leasedRun, ct) =>
-            {
-                try
-                {
-                    await ExecuteAsync(leasedRun, ct);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    errors.Add(ex);
-                }
-            }
+        var heartbeat = new LeaseHeartbeat(
+            (leases, expiry, ct) => _store.RenewRunLeasesAsync(leases, expiry, ct),
+            _options.LeaseDuration,
+            _logger
         );
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
+
+        try
+        {
+            await Parallel.ForEachAsync(
+                leasedRuns,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = Math.Max(_options.MaxConcurrency, 1),
+                    CancellationToken = cancellationToken,
+                },
+                async (leasedRun, ct) =>
+                {
+                    try
+                    {
+                        await ExecuteAsync(leasedRun, heartbeat, ct);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        errors.Add(ex);
+                    }
+                }
+            );
+        }
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            await heartbeatLoop;
+        }
 
         if (!errors.IsEmpty)
         {
@@ -89,65 +103,53 @@ internal sealed class WorkflowWorker(
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        var consecutiveFailures = 0;
+        var heartbeat = new LeaseHeartbeat(
+            (leases, expiry, ct) => _store.RenewRunLeasesAsync(leases, expiry, ct),
+            _options.LeaseDuration,
+            _logger
+        );
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
 
-        _logger?.LogInformation("Workflow worker {WorkerId} started.", _options.WorkerId);
-
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                var processed = await RunOnceAsync(cancellationToken);
-                consecutiveFailures = 0;
-
-                if (processed == 0)
-                {
-                    await Task.Delay(_options.PollInterval, cancellationToken);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                _logger?.LogInformation("Workflow worker {WorkerId} stopped.", _options.WorkerId);
-                return;
-            }
-            catch (Exception ex) when (ex is not OutOfMemoryException)
-            {
-                consecutiveFailures++;
-                var delay = BackoffDelay(consecutiveFailures);
-                _logger?.LogWarning(
-                    ex,
-                    "Workflow worker {WorkerId} failed; backing off for {BackoffDelayMs}ms before retrying.",
+            await ContinuousDispatcher.RunAsync(
+                new ContinuousDispatcher.Settings(
+                    "Workflow",
                     _options.WorkerId,
-                    delay.TotalMilliseconds
-                );
-
-                try
+                    _options.MaxConcurrency,
+                    _options.BatchSize,
+                    _options.PollInterval
+                ),
+                (count, ct) =>
+                    _store.LeaseRunsAsync(
+                        _options.WorkerId,
+                        count,
+                        _options.LeaseDuration,
+                        DateTimeOffset.UtcNow,
+                        Math.Max(_options.MaxAttempts, 1),
+                        ct
+                    ),
+                static run => run.WorkflowRunId,
+                async (run, ct) =>
                 {
-                    await Task.Delay(delay, cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger?.LogInformation(
-                        "Workflow worker {WorkerId} stopped.",
-                        _options.WorkerId
-                    );
-                    return;
-                }
-            }
+                    await ExecuteAsync(run, heartbeat, ct);
+                    return true;
+                },
+                _logger,
+                cancellationToken
+            );
         }
-
-        _logger?.LogInformation("Workflow worker {WorkerId} stopped.", _options.WorkerId);
-    }
-
-    private TimeSpan BackoffDelay(int consecutiveFailures)
-    {
-        var baseMs = _options.PollInterval.TotalMilliseconds;
-        var factor = Math.Pow(2, Math.Min(consecutiveFailures - 1, 16));
-        return TimeSpan.FromMilliseconds(Math.Min(baseMs * factor, MaxBackoff.TotalMilliseconds));
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            await heartbeatLoop;
+        }
     }
 
     private async Task ExecuteAsync(
         LeasedWorkflowRun leasedRun,
+        LeaseHeartbeat heartbeat,
         CancellationToken cancellationToken
     )
     {
@@ -164,14 +166,22 @@ internal sealed class WorkflowWorker(
 
         using var runCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var leaseLost = false;
-        var renewer = RenewLeaseLoopAsync(
-            leasedRun,
+        heartbeat.Register(
+            leasedRun.WorkflowRunId,
+            leasedRun.LeaseToken,
+            leasedRun.LeaseExpiresAt,
             onLeaseLost: () =>
             {
                 leaseLost = true;
-                runCts.Cancel();
-            },
-            stopToken: runCts.Token
+                try
+                {
+                    runCts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The run already finished and the token was disposed; nothing to stop.
+                }
+            }
         );
 
         try
@@ -210,8 +220,8 @@ internal sealed class WorkflowWorker(
         }
         finally
         {
+            heartbeat.Unregister(leasedRun.WorkflowRunId);
             runCts.Cancel();
-            await renewer;
         }
     }
 
@@ -315,58 +325,4 @@ internal sealed class WorkflowWorker(
         );
     }
 
-    private async Task RenewLeaseLoopAsync(
-        LeasedWorkflowRun leasedRun,
-        Action onLeaseLost,
-        CancellationToken stopToken
-    )
-    {
-        var currentLeaseExpiresAt = leasedRun.LeaseExpiresAt;
-
-        while (!stopToken.IsCancellationRequested)
-        {
-            try
-            {
-                await Task.Delay(TimeSpan.FromTicks(_options.LeaseDuration.Ticks / 3), stopToken);
-                var leaseExpiresAt = DateTimeOffset.UtcNow.Add(_options.LeaseDuration);
-                var renewed = await _store.RenewRunLeaseAsync(
-                    leasedRun.WorkflowRunId,
-                    leasedRun.LeaseToken,
-                    leaseExpiresAt,
-                    stopToken
-                );
-
-                if (!renewed)
-                {
-                    onLeaseLost();
-                    return;
-                }
-
-                currentLeaseExpiresAt = leaseExpiresAt;
-            }
-            catch (OperationCanceledException) when (stopToken.IsCancellationRequested)
-            {
-                return;
-            }
-            catch (Exception ex)
-            {
-                if (DateTimeOffset.UtcNow >= currentLeaseExpiresAt)
-                {
-                    _logger?.LogWarning(
-                        ex,
-                        "Workflow run {WorkflowRunId} lease renewal failed past expiry.",
-                        leasedRun.WorkflowRunId
-                    );
-                    onLeaseLost();
-                    return;
-                }
-
-                _logger?.LogDebug(
-                    ex,
-                    "Workflow run {WorkflowRunId} lease renewal failed; retrying.",
-                    leasedRun.WorkflowRunId
-                );
-            }
-        }
-    }
 }

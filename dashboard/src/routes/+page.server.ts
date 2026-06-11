@@ -6,8 +6,7 @@ const PAGE_SIZE = 50;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const STATUSES = ["pending", "running", "succeeded", "failed"];
 
-// Keyset cursor: the created_at of a boundary row (as Postgres text, to keep
-// microsecond precision that a JS Date would truncate) plus its run id.
+// Keyset cursor: keep ms precision (ts) + id
 type Cursor = { ts: string; id: string };
 
 const parseCursor = (raw: string | null): Cursor | null => {
@@ -70,48 +69,45 @@ export const load: PageServerLoad = async ({ url }) => {
   const after = parseCursor(url.searchParams.get("after"));
   const before = after ? null : parseCursor(url.searchParams.get("before"));
 
-  let runsQuery = db
-    .selectFrom("pw_workflow_runs as r")
-    .select((eb) => [
-      "r.workflow_run_id",
-      "r.workflow_name",
-      "r.status",
-      "r.attempt",
-      "r.max_attempts",
-      "r.created_at",
-      "r.completed_at",
-      sql<string>`r.created_at::text`.as("cursor_ts"),
-      eb
-        .selectFrom("pw_workflow_steps as s")
-        .whereRef("s.workflow_run_id", "=", "r.workflow_run_id")
-        .select((seb) => seb.fn.countAll<number>().as("c"))
-        .as("steps_total"),
-      eb
-        .selectFrom("pw_workflow_steps as s")
-        .whereRef("s.workflow_run_id", "=", "r.workflow_run_id")
-        .where("s.status", "=", "succeeded")
-        .select((seb) => seb.fn.countAll<number>().as("c"))
-        .as("steps_done"),
-      eb
-        .selectFrom("pw_workflow_timers as t")
-        .whereRef("t.workflow_run_id", "=", "r.workflow_run_id")
-        .where("t.fire_at", ">", sql<Date>`now()`)
-        .select((teb) => teb.fn.max("t.fire_at").as("f"))
-        .as("sleeping_until"),
-      eb
-        .selectFrom("pw_workflow_signal_waits as w")
-        .whereRef("w.workflow_run_id", "=", "r.workflow_run_id")
-        .where("w.completed_at", "is", null)
-        .select("w.signal_name")
-        .orderBy("w.wait_seq")
-        .limit(1)
-        .as("waiting_for_signal"),
-    ]);
+  let runsQuery = db.selectFrom("pw_workflow_runs as r").select((eb) => [
+    "r.workflow_run_id",
+    "r.workflow_name",
+    "r.status",
+    "r.attempt",
+    "r.max_attempts",
+    "r.created_at",
+    "r.completed_at",
+    sql<string>`r.created_at::text`.as("cursor_ts"),
+    eb
+      .selectFrom("pw_workflow_steps as s")
+      .whereRef("s.workflow_run_id", "=", "r.workflow_run_id")
+      .select((seb) => seb.fn.countAll<number>().as("c"))
+      .as("steps_total"),
+    eb
+      .selectFrom("pw_workflow_steps as s")
+      .whereRef("s.workflow_run_id", "=", "r.workflow_run_id")
+      .where("s.status", "=", "succeeded")
+      .select((seb) => seb.fn.countAll<number>().as("c"))
+      .as("steps_done"),
+    eb
+      .selectFrom("pw_workflow_timers as t")
+      .whereRef("t.workflow_run_id", "=", "r.workflow_run_id")
+      .where("t.fire_at", ">", sql<Date>`now()`)
+      .select((teb) => teb.fn.max("t.fire_at").as("f"))
+      .as("sleeping_until"),
+    eb
+      .selectFrom("pw_workflow_signal_waits as w")
+      .whereRef("w.workflow_run_id", "=", "r.workflow_run_id")
+      .where("w.completed_at", "is", null)
+      .select("w.signal_name")
+      .orderBy("w.wait_seq")
+      .limit(1)
+      .as("waiting_for_signal"),
+  ]);
 
   if (status) runsQuery = runsQuery.where("r.status", "=", status);
   if (workflow) runsQuery = runsQuery.where("r.workflow_name", "=", workflow);
   if (q) {
-    // Search is an exact run id lookup; anything that isn't a uuid matches nothing.
     runsQuery = UUID_RE.test(q)
       ? runsQuery.where("r.workflow_run_id", "=", q)
       : runsQuery.where(sql<boolean>`false`);
@@ -124,16 +120,11 @@ export const load: PageServerLoad = async ({ url }) => {
       eb(
         eb.refTuple("r.created_at", "r.workflow_run_id"),
         op,
-        eb.tuple(
-          sql<Date>`${cursor.ts}::timestamptz`,
-          sql<string>`${cursor.id}::uuid`
-        )
-      )
+        eb.tuple(sql<Date>`${cursor.ts}::timestamptz`, sql<string>`${cursor.id}::uuid`),
+      ),
     );
   }
 
-  // A `before` cursor pages backwards: scan in the opposite order, then
-  // restore the display order in JS.
   const order = before ? (dir === "desc" ? "asc" : "desc") : dir;
 
   const [statusCounts, workflowNames, rowsRaw, selected] = await Promise.all([
@@ -162,17 +153,15 @@ export const load: PageServerLoad = async ({ url }) => {
   const rows = rowsRaw.slice(0, PAGE_SIZE);
   if (before) rows.reverse();
 
-  const cursorOf = (row: (typeof rows)[number]) =>
-    `${row.cursor_ts}_${row.workflow_run_id}`;
+  const cursorOf = (row: (typeof rows)[number]) => `${row.cursor_ts}_${row.workflow_run_id}`;
 
   return {
     statusCounts,
     workflows: workflowNames.map((w) => w.workflow_name),
-    // pg returns bigint counts as strings; normalize for the UI
     runs: rows.map((r) => ({
       ...r,
-      steps_total: Number(r.steps_total ?? 0),
-      steps_done: Number(r.steps_done ?? 0),
+      steps_total: r.steps_total ?? 0,
+      steps_done: r.steps_done ?? 0,
     })),
     filters: { status, workflow, q, dir },
     page: {

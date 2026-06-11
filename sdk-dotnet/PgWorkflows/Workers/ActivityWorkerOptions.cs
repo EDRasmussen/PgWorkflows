@@ -5,19 +5,19 @@ public sealed record ActivityWorkerOptions
     public string WorkerId { get; init; } = Environment.MachineName;
 
     /// <summary>
-    /// Maximum number of jobs leased per poll. Only takes effect when set below
-    /// <see cref="MaxConcurrency"/>: the worker never leases more than it can run at once,
-    /// since a job waiting behind the concurrency limit has no lease renewer. Lower it to
-    /// grab smaller chunks per poll; otherwise leave it and tune <see cref="MaxConcurrency"/>.
+    /// Jobs leased per database round-trip, capped at <see cref="MaxConcurrency"/>. The worker
+    /// dispatches continuously — it refills a freed slot as soon as a job finishes — so this is a
+    /// round-trip amortization knob, not a concurrency limit. Leave it and tune
+    /// <see cref="MaxConcurrency"/>; lower it only to grab smaller chunks per lease.
     /// </summary>
     public int BatchSize { get; init; } = 16;
 
     /// <summary>
-    /// Maximum number of activities executed concurrently, and the cap on how many jobs
-    /// are leased per poll. Defaults to four per processor, suited to the IO-bound
-    /// activities typical of a job queue; lower it for CPU-bound work.
+    /// Maximum number of activities in flight at once. The worker keeps this many running, leasing
+    /// a replacement the moment one finishes. The connection pool must be large enough to cover it
+    /// (plus the workflow worker's share); startup fails fast otherwise.
     /// </summary>
-    public int MaxConcurrency { get; init; } = Environment.ProcessorCount * 4;
+    public int MaxConcurrency { get; init; } = 10;
 
     public TimeSpan LeaseDuration { get; init; } = TimeSpan.FromSeconds(30);
 

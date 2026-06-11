@@ -30,6 +30,17 @@ internal interface IWorkflowStore
     );
 
     /// <summary>
+    /// Extends the lease on many runs in one statement. Returns the ids still held under their
+    /// given lease token; any input id absent from the result has lost its lease and its worker
+    /// should abandon it.
+    /// </summary>
+    ValueTask<IReadOnlyList<Guid>> RenewRunLeasesAsync(
+        IReadOnlyList<(Guid WorkflowRunId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
     /// Releases a leased run back to pending without recording a failure, rolling back the
     /// attempt the lease charged. Used when execution was stopped by a transient infrastructure
     /// error (connection exhaustion, network drop): the workflow did not fail, the worker just

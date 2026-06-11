@@ -387,6 +387,67 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     }
 
     [Fact]
+    public async Task Many_activity_waiting_workflows_wake_promptly_without_waiting_out_park_grace()
+    {
+        // Schedule->park lost-wake race: with many workflows each scheduling an activity that
+        // completes fast, a completion can land while its parent is still mid-park. A lost wake
+        // strands that run until ParkGrace, set here far above the assertion window so any lost
+        // wake trips the deadline instead of hiding behind a short backstop.
+        const int workflowCount = 50;
+        var services = new ServiceCollection();
+        services.AddSingleton(new TestActivities());
+        services.AddPgWorkflows(pg =>
+            pg.UsePostgres(DataSource, ensureSchemaOnStart: false)
+                .ConfigureActivityWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-activity-worker",
+                        MaxConcurrency = 16,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                    }
+                )
+                .ConfigureWorkflowWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-workflow-worker",
+                        MaxConcurrency = 16,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                        ParkGrace = TimeSpan.FromSeconds(30),
+                    }
+                )
+                .AddActivities<TestActivities>()
+                .AddWorkflow<ClientGreetingWorkflow>()
+        );
+
+        await using var provider = services.BuildServiceProvider();
+        var hostedService = Assert.Single(provider.GetServices<IHostedService>());
+        await hostedService.StartAsync(CancellationToken.None);
+
+        try
+        {
+            var client = provider.GetRequiredService<IPgWorkflowClient>();
+            var runIds = new List<Guid>();
+            for (var i = 0; i < workflowCount; i++)
+            {
+                var handle = await client.StartAsync<ClientGreetingWorkflow, string, string>(
+                    $"user-{i}"
+                );
+                runIds.Add(handle.WorkflowRunId);
+            }
+
+            foreach (var runId in runIds)
+            {
+                var run = await WaitForWorkflowTerminalAsync(runId, TimeSpan.FromSeconds(15));
+                Assert.Equal(WorkflowStatus.Succeeded, run.Status);
+            }
+        }
+        finally
+        {
+            await hostedService.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Hosted_workflow_worker_treats_recorded_workflow_failure_as_processed()
     {
         var workflowRegistry = new WorkflowRegistry();

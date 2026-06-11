@@ -37,6 +37,17 @@ internal interface IActivityJobStore
     );
 
     /// <summary>
+    /// Extends the lease on many jobs in one statement. Returns the ids still held under their
+    /// given lease token; any input id absent from the result has lost its lease (reclaimed or
+    /// completed) and its worker should abandon it.
+    /// </summary>
+    ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
+        IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
     /// Records a successful JSON result. Returns <c>false</c> when the lease is no longer
     /// held (another worker reclaimed the job), in which case nothing was written and
     /// the caller should abandon. When the job belongs to a workflow run and it was the last

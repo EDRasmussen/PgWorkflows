@@ -250,6 +250,53 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
 
+    public async ValueTask<IReadOnlyList<Guid>> RenewRunLeasesAsync(
+        IReadOnlyList<(Guid WorkflowRunId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (leases.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = new Guid[leases.Count];
+        var tokens = new string[leases.Count];
+        for (var i = 0; i < leases.Count; i++)
+        {
+            ids[i] = leases[i].WorkflowRunId;
+            tokens[i] = leases[i].LeaseToken;
+        }
+
+        const string sql = """
+            update pw_workflow_runs
+            set updated_at = @updated_at,
+                lease_expires_at = @lease_expires_at
+            where status = @running_status
+              and (workflow_run_id, lease_token) in (
+                  select * from unnest(@ids::uuid[], @tokens::text[]))
+            returning workflow_run_id;
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("ids", ids);
+        command.Parameters.AddWithValue("tokens", tokens);
+
+        var held = new List<Guid>(leases.Count);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            held.Add(reader.GetFieldValue<Guid>(0));
+        }
+
+        return held;
+    }
+
     public async ValueTask<bool> ReleaseRunAsync(
         Guid workflowRunId,
         string leaseToken,

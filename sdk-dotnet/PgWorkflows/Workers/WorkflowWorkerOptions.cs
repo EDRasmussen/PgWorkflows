@@ -4,9 +4,20 @@ public sealed record WorkflowWorkerOptions
 {
     public string WorkerId { get; init; } = Environment.MachineName;
 
+    /// <summary>
+    /// Runs leased per database round-trip, capped at <see cref="MaxConcurrency"/>. The worker
+    /// dispatches continuously — it refills a freed slot as soon as a run finishes — so this is a
+    /// round-trip amortization knob, not a concurrency limit. Leave it and tune
+    /// <see cref="MaxConcurrency"/>; lower it only to grab smaller chunks per lease.
+    /// </summary>
     public int BatchSize { get; init; } = 16;
 
-    public int MaxConcurrency { get; init; } = Environment.ProcessorCount;
+    /// <summary>
+    /// Maximum number of workflow runs in flight at once. The worker keeps this many running,
+    /// leasing a replacement the moment one finishes. The connection pool must be large enough to
+    /// cover it (plus the activity worker's share); startup fails fast otherwise.
+    /// </summary>
+    public int MaxConcurrency { get; init; } = 10;
 
     public TimeSpan LeaseDuration { get; init; } = TimeSpan.FromSeconds(30);
 

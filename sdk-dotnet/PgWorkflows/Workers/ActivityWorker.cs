@@ -14,8 +14,6 @@ internal sealed class ActivityWorker(
     ILogger<ActivityWorker>? logger = null
 )
 {
-    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
-
     private readonly ActivityRegistry _registry =
         registry ?? throw new ArgumentNullException(nameof(registry));
     private readonly IActivityJobStore _store =
@@ -59,22 +57,38 @@ internal sealed class ActivityWorker(
         // retried after its lease expires.
         var writeErrors = new ConcurrentBag<Exception>();
 
-        await Parallel.ForEachAsync(
-            leasedJobs,
-            new ParallelOptions
-            {
-                MaxDegreeOfParallelism = Math.Max(_options.MaxConcurrency, 1),
-                CancellationToken = cancellationToken,
-            },
-            async (leasedJob, ct) =>
-            {
-                var error = await ExecuteAsync(leasedJob, ct);
-                if (error is not null)
-                {
-                    writeErrors.Add(error);
-                }
-            }
+        var heartbeat = new LeaseHeartbeat(
+            (leases, expiry, ct) => _store.RenewLeasesAsync(leases, expiry, ct),
+            _options.LeaseDuration,
+            _logger
         );
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
+
+        try
+        {
+            await Parallel.ForEachAsync(
+                leasedJobs,
+                new ParallelOptions
+                {
+                    MaxDegreeOfParallelism = Math.Max(_options.MaxConcurrency, 1),
+                    CancellationToken = cancellationToken,
+                },
+                async (leasedJob, ct) =>
+                {
+                    var error = await ExecuteAsync(leasedJob, heartbeat, ct);
+                    if (error is not null)
+                    {
+                        writeErrors.Add(error);
+                    }
+                }
+            );
+        }
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            await heartbeatLoop;
+        }
 
         if (!writeErrors.IsEmpty)
         {
@@ -89,73 +103,50 @@ internal sealed class ActivityWorker(
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        var consecutiveFailures = 0;
+        var heartbeat = new LeaseHeartbeat(
+            (leases, expiry, ct) => _store.RenewLeasesAsync(leases, expiry, ct),
+            _options.LeaseDuration,
+            _logger
+        );
+        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
 
-        _logger?.LogInformation("Activity worker {WorkerId} started.", _options.WorkerId);
-
-        while (!cancellationToken.IsCancellationRequested)
+        try
         {
-            try
-            {
-                var processed = await RunOnceAsync(cancellationToken);
-                consecutiveFailures = 0;
-
-                if (processed == 0)
-                {
-                    await Task.Delay(_options.PollInterval, cancellationToken);
-                }
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
-                return; // graceful shutdown
-            }
-            catch (Exception ex)
-            {
-                // Process-fatal conditions must take the worker (and process) down rather
-                // than being retried forever.
-                if (ex is OutOfMemoryException)
-                {
-                    throw;
-                }
-
-                // A transient failure (e.g. the store is briefly unavailable) must not kill
-                // the worker. Back off — growing with consecutive failures so a sustained
-                // outage isn't hammered — and try again. (Phase 1 adds structured logging.)
-                consecutiveFailures++;
-                var delay = BackoffDelay(consecutiveFailures);
-                _logger?.LogWarning(
-                    ex,
-                    "Activity worker {WorkerId} failed; backing off for {BackoffDelayMs}ms before retrying.",
+            await ContinuousDispatcher.RunAsync(
+                new ContinuousDispatcher.Settings(
+                    "Activity",
                     _options.WorkerId,
-                    delay.TotalMilliseconds
-                );
-                try
-                {
-                    await Task.Delay(delay, cancellationToken);
-                }
-                catch (OperationCanceledException)
-                {
-                    _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
-                    return;
-                }
-            }
+                    _options.MaxConcurrency,
+                    _options.BatchSize,
+                    _options.PollInterval
+                ),
+                (count, ct) =>
+                    _store.LeaseAsync(
+                        _options.WorkerId,
+                        count,
+                        _options.LeaseDuration,
+                        DateTimeOffset.UtcNow,
+                        ct
+                    ),
+                static job => job.JobId,
+                async (job, ct) => await ExecuteAsync(job, heartbeat, ct) is null,
+                _logger,
+                cancellationToken
+            );
         }
-
-        _logger?.LogInformation("Activity worker {WorkerId} stopped.", _options.WorkerId);
-    }
-
-    private TimeSpan BackoffDelay(int consecutiveFailures)
-    {
-        var baseMs = _options.PollInterval.TotalMilliseconds;
-        var factor = Math.Pow(2, Math.Min(consecutiveFailures - 1, 16));
-        return TimeSpan.FromMilliseconds(Math.Min(baseMs * factor, MaxBackoff.TotalMilliseconds));
+        finally
+        {
+            await heartbeatCts.CancelAsync();
+            await heartbeatLoop;
+        }
     }
 
     // Returns the exception if recording the outcome failed (a real store error), otherwise
     // null. Never propagates: a throw from a Parallel body would cancel sibling jobs.
     private async Task<Exception?> ExecuteAsync(
         LeasedActivityJob leasedJob,
+        LeaseHeartbeat heartbeat,
         CancellationToken cancellationToken
     )
     {
@@ -179,22 +170,28 @@ internal sealed class ActivityWorker(
             return record.Error;
         }
 
-        // One token ties the handler and its renewer together. Cancelling it both stops
-        // the handler and tells the renewer to exit, so it serves two roles: the renewer
-        // cancels it when the lease is lost (the handler must stop working on a job it no
-        // longer owns), and the finally cancels it once the handler returns (the renewer
-        // can stop). leaseLost records which of the two happened.
+        // jobCts stops the handler when the lease is lost (the shared heartbeat cancels it — the
+        // handler must stop working on a job it no longer owns) or when the handler returns.
+        // leaseLost records that the cancellation came from lease loss, not a normal finish.
         using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var leaseLost = false;
 
-        var renewer = RenewLeaseLoopAsync(
-            leasedJob,
+        heartbeat.Register(
+            leasedJob.JobId,
+            leasedJob.LeaseToken,
+            leasedJob.LeaseExpiresAt,
             onLeaseLost: () =>
             {
                 leaseLost = true;
-                jobCts.Cancel();
-            },
-            stopToken: jobCts.Token
+                try
+                {
+                    jobCts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // The handler already finished and the token was disposed; nothing to stop.
+                }
+            }
         );
 
         var context = new ActivityExecutionContext(
@@ -235,8 +232,8 @@ internal sealed class ActivityWorker(
         }
         finally
         {
+            heartbeat.Unregister(leasedJob.JobId);
             jobCts.Cancel();
-            await renewer;
         }
 
         // Lease was reclaimed mid-execution: another worker owns the job now, so write
@@ -392,75 +389,6 @@ internal sealed class ActivityWorker(
         catch (Exception ex)
         {
             return new RecordAttempt(ex, LeaseHeld: false);
-        }
-    }
-
-    private async Task RenewLeaseLoopAsync(
-        LeasedActivityJob leasedJob,
-        Action onLeaseLost,
-        CancellationToken stopToken
-    )
-    {
-        var interval = TimeSpan.FromTicks(_options.LeaseDuration.Ticks / 3);
-        var leaseExpiresAt = leasedJob.LeaseExpiresAt;
-
-        while (true)
-        {
-            try
-            {
-                await Task.Delay(interval, stopToken);
-            }
-            catch (OperationCanceledException)
-            {
-                // The handler finished (or the worker is shutting down): stop renewing.
-                return;
-            }
-
-            try
-            {
-                var newExpiresAt = DateTimeOffset.UtcNow + _options.LeaseDuration;
-                if (
-                    await _store.RenewLeaseAsync(
-                        leasedJob.JobId,
-                        leasedJob.LeaseToken,
-                        newExpiresAt,
-                        stopToken
-                    )
-                )
-                {
-                    leaseExpiresAt = newExpiresAt;
-                }
-                else
-                {
-                    _logger?.LogWarning(
-                        "Lease renewal lost for activity job {JobId} ({ActivityName}).",
-                        leasedJob.JobId,
-                        leasedJob.ActivityName
-                    );
-                    onLeaseLost();
-                    return;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
-            catch
-            {
-                // Couldn't renew (transient store error). If the lease has actually lapsed
-                // while we were failing, stop the handler — another worker can reclaim the
-                // job now and we must not keep running it. Otherwise retry on the next tick.
-                if (DateTimeOffset.UtcNow >= leaseExpiresAt)
-                {
-                    _logger?.LogWarning(
-                        "Lease renewal failed past expiry for activity job {JobId} ({ActivityName}).",
-                        leasedJob.JobId,
-                        leasedJob.ActivityName
-                    );
-                    onLeaseLost();
-                    return;
-                }
-            }
         }
     }
 

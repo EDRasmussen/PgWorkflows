@@ -39,6 +39,32 @@ public sealed class PgWorkflowsBuilder
 
     internal WorkflowWorkerOptions WorkflowWorkerOptions { get; private set; } = new();
 
+    internal int? EffectiveMaxPoolSize { get; private set; }
+
+    private string? _postgresConnectionString;
+    private int? _explicitMaxPoolSize;
+    private bool _poolExplicit;
+    private string? _resolvedConnectionString;
+
+    private string ResolvedConnectionString =>
+        _resolvedConnectionString
+        ?? throw new InvalidOperationException(
+            "UsePostgres connection string was not finalized before the data source was resolved."
+        );
+
+    /// <summary>
+    /// Default connection-acquisition timeout. Npgsql's own default is 15s; under a pool that's
+    /// momentarily exhausted that turns every store call into a 15s stall. A few seconds lets the
+    /// worker's backoff handle a transient pool-full gracefully instead of freezing.
+    /// </summary>
+    internal const int DefaultConnectionTimeoutSeconds = 5;
+
+    /// <summary>
+    /// Spare connections beyond the worker concurrency totals: the two lease-heartbeat loops plus
+    /// each worker's lease/poll connection.
+    /// </summary>
+    internal const int ConnectionHeadroom = 4;
+
     /// <summary>
     /// Per-process connection pool cap applied when neither <c>maxPoolSize</c> nor the connection
     /// string says otherwise. Npgsql's own default of 100 equals Postgres' default
@@ -48,9 +74,10 @@ public sealed class PgWorkflowsBuilder
     internal const int DefaultMaxPoolSize = 20;
 
     /// <param name="maxPoolSize">
-    /// Maximum number of pooled connections this process opens. When null, a
-    /// <c>Maximum Pool Size</c> from the connection string is respected, and
-    /// <see cref="DefaultMaxPoolSize"/> applies if the connection string does not set one.
+    /// Maximum number of pooled connections this process opens. When null, the pool is sized to fit
+    /// the worker concurrency (activity + workflow + headroom), or <see cref="DefaultMaxPoolSize"/>
+    /// for a client-only process. A <c>Maximum Pool Size</c> in the connection string also counts as
+    /// an explicit override.
     /// </param>
     public PgWorkflowsBuilder UsePostgres(
         string connectionString,
@@ -60,22 +87,15 @@ public sealed class PgWorkflowsBuilder
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
 
-        var connectionStringBuilder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (maxPoolSize is { } explicitMaxPoolSize)
-        {
-            connectionStringBuilder.MaxPoolSize = explicitMaxPoolSize;
-        }
-        else if (
-            !connectionStringBuilder
+        _postgresConnectionString = connectionString;
+        _explicitMaxPoolSize = maxPoolSize;
+        _poolExplicit =
+            maxPoolSize.HasValue
+            || new NpgsqlConnectionStringBuilder(connectionString)
                 .Keys.Cast<string>()
-                .Contains("Maximum Pool Size", StringComparer.OrdinalIgnoreCase)
-        )
-        {
-            connectionStringBuilder.MaxPoolSize = DefaultMaxPoolSize;
-        }
+                .Contains("Maximum Pool Size", StringComparer.OrdinalIgnoreCase);
 
-        var effectiveConnectionString = connectionStringBuilder.ConnectionString;
-        Services.AddSingleton(_ => NpgsqlDataSource.Create(effectiveConnectionString));
+        Services.AddSingleton(_ => NpgsqlDataSource.Create(ResolvedConnectionString));
         AddPostgresStore(ensureSchemaOnStart);
         return this;
     }
@@ -87,9 +107,75 @@ public sealed class PgWorkflowsBuilder
     {
         ArgumentNullException.ThrowIfNull(dataSource);
 
+        // A pre-built data source owns its own pool; we can only validate it, not size it.
+        _poolExplicit = true;
+        if (
+            new NpgsqlConnectionStringBuilder(dataSource.ConnectionString) is { MaxPoolSize: var pool }
+            && pool > 0
+        )
+        {
+            EffectiveMaxPoolSize = pool;
+        }
+
         Services.AddSingleton(dataSource);
         AddPostgresStore(ensureSchemaOnStart);
         return this;
+    }
+
+    /// <summary>
+    /// Finalizes the connection pool now that worker concurrency is known. When the pool was not set
+    /// explicitly it is sized to the concurrency the workers need, so the two stay coupled by
+    /// construction — there is nothing to reconcile. An explicit pool that is too small fails fast.
+    /// </summary>
+    internal void FinalizeConnectionPool()
+    {
+        var requiredForWorkers =
+            Math.Max(ActivityWorkerOptions.MaxConcurrency, 1)
+            + Math.Max(WorkflowWorkerOptions.MaxConcurrency, 1)
+            + ConnectionHeadroom;
+
+        if (_postgresConnectionString is { } connectionString)
+        {
+            var csb = new NpgsqlConnectionStringBuilder(connectionString);
+            if (_explicitMaxPoolSize is { } explicitMaxPoolSize)
+            {
+                csb.MaxPoolSize = explicitMaxPoolSize;
+            }
+            else if (!_poolExplicit)
+            {
+                csb.MaxPoolSize = RunWorkers ? requiredForWorkers : DefaultMaxPoolSize;
+            }
+
+            if (!csb.Keys.Cast<string>().Contains("Timeout", StringComparer.OrdinalIgnoreCase))
+            {
+                csb.Timeout = DefaultConnectionTimeoutSeconds;
+            }
+
+            EffectiveMaxPoolSize = csb.MaxPoolSize;
+            _resolvedConnectionString = csb.ConnectionString;
+        }
+
+        if (_poolExplicit)
+        {
+            GuardExplicitPool(requiredForWorkers);
+        }
+    }
+
+    private void GuardExplicitPool(int requiredForWorkers)
+    {
+        if (!RunWorkers || EffectiveMaxPoolSize is not { } pool || pool >= requiredForWorkers)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"PgWorkflows worker concurrency (activity {ActivityWorkerOptions.MaxConcurrency} + "
+                + $"workflow {WorkflowWorkerOptions.MaxConcurrency}) needs about {requiredForWorkers} "
+                + $"pooled connections, but the pool is capped at {pool} (Maximum Pool Size); workers "
+                + $"would stall under load. Raise the pool to >= {requiredForWorkers} (keeping the total "
+                + $"across all processes under the server's max_connections), or lower MaxConcurrency. "
+                + $"Use DisableWorkers() for client-only processes."
+        );
     }
 
     /// <summary>

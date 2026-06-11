@@ -19,7 +19,7 @@ builder.Services.AddPgWorkflows(pg =>
 
 | Method | Purpose |
 | ------ | ------- |
-| `UsePostgres(connectionString, ensureSchemaOnStart = true, maxPoolSize = null)` | Point PgWorkflows at your database. Creates the schema on startup by default and caps the connection pool at 20 per process unless told otherwise (see [connection pooling](#connection-pooling)). |
+| `UsePostgres(connectionString, ensureSchemaOnStart = true, maxPoolSize = null)` | Point PgWorkflows at your database. Creates the schema on startup by default and sizes the connection pool to the worker concurrency unless told otherwise (see [connection pooling](#connection-pooling)). |
 | `DisableWorkers()` | Client-only mode: the process can start, signal, and await workflows but runs no background workers. See [workers & scaling](/workers-and-scaling/). |
 | `ConfigureWorkflowWorker(options => ...)` | Tune the workflow worker (see below). |
 | `ConfigureActivityWorker(options => ...)` | Tune the activity worker (see below). |
@@ -31,12 +31,16 @@ builder.Services.AddPgWorkflows(pg =>
 
 ## Connection pooling
 
-`UsePostgres` caps the Npgsql connection pool at **20 connections per process**. Npgsql's
-own default is 100, which is also Postgres' default `max_connections`, so a few API and
-worker processes sharing one database can exhaust it under load and start failing with
-`53300: sorry, too many clients already`.
+A worker holds one connection per in-flight item, so the pool size and the worker
+concurrency are really the same number. You set the concurrency you want;
+`UsePostgres` **sizes the pool to fit it** — `ActivityWorker.MaxConcurrency +
+WorkflowWorker.MaxConcurrency` plus a little headroom (a client-only process gets 20).
+There is no second knob to reconcile. A single shared heartbeat renews all of a worker's
+leases in one query, so renewal does not add a connection per in-flight item.
 
-Override the cap per process with the `maxPoolSize` parameter:
+Override the per-process cap explicitly with the `maxPoolSize` parameter (e.g. to share a
+budget across a large fleet); an explicit pool that is too small for the configured
+concurrency **fails fast** at startup:
 
 ```csharp
 pg.UsePostgres(connectionString, maxPoolSize: 40)
@@ -48,20 +52,21 @@ Or in the connection string, which is respected when `maxPoolSize` is not passed
 Host=db;Database=app;Username=app;Maximum Pool Size=40
 ```
 
-When sizing, budget across the whole fleet: every API and worker process holds its own
-pool, and the sum of all pools must stay below the server's `max_connections` with room
-to spare for migrations, dashboards, and ad-hoc connections.
-
 If you pass a pre-built `NpgsqlDataSource` to `UsePostgres`, its pool settings are used
-as-is and no cap is applied.
+as-is (and validated against the concurrency, failing fast if too small).
+
+When you do set the pool explicitly, budget across the whole fleet: every API and worker
+process holds its own pool, and the sum of all pools must stay below the server's
+`max_connections` (Npgsql's and Postgres' default is 100) with room to spare for
+migrations, dashboards, and ad-hoc connections.
 
 ## WorkflowWorkerOptions
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `WorkerId` | machine name | Identifies this worker in leases. |
-| `BatchSize` | `16` | Max runs leased per poll. |
-| `MaxConcurrency` | processor count | Max runs executed concurrently. |
+| `BatchSize` | `16` | Runs leased per database round-trip, capped at `MaxConcurrency`. A round-trip amortization knob, not a concurrency limit; the worker refills slots continuously. |
+| `MaxConcurrency` | `10` | Max runs in flight at once. The worker keeps this many running, leasing a replacement the moment one finishes. The connection pool sizes itself to this (plus the activity worker's share) — see [connection pooling](#connection-pooling). |
 | `LeaseDuration` | 30 s | How long a lease lives between heartbeats. |
 | `PollInterval` | 250 ms | How often an idle worker polls for work. |
 | `ParkGrace` | 30 s | Safety-net deadline for runs parked on activity steps; they're normally woken sooner by the edge-trigger. |
@@ -73,8 +78,8 @@ as-is and no cap is applied.
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `WorkerId` | machine name | Identifies this worker in leases. |
-| `BatchSize` | `16` | Max jobs leased per poll; only effective below `MaxConcurrency`. |
-| `MaxConcurrency` | processor count × 4 | Max activities executed concurrently. Lower it for CPU-bound work. |
+| `BatchSize` | `16` | Jobs leased per database round-trip, capped at `MaxConcurrency`. A round-trip amortization knob, not a concurrency limit; the worker refills slots continuously. |
+| `MaxConcurrency` | `10` | Max activities in flight at once, refilled the moment one finishes. The connection pool sizes itself to this (plus the workflow worker's share) — see [connection pooling](#connection-pooling). |
 | `LeaseDuration` | 30 s | How long a lease lives between heartbeats. |
 | `PollInterval` | 250 ms | How often an idle worker polls for work. |
 | `GetRetryDelay` | `min(attempt × 5 s, 60 s)` | Backoff between activity retry attempts. |
