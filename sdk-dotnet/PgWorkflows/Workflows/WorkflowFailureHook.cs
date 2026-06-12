@@ -1,8 +1,7 @@
 namespace PgWorkflows.Workflows;
 
-/// <param name="InputJson">Serialized JSON supplied to the failure hook activity.</param>
-/// <param name="ResultJson">Serialized JSON recorded when the failure hook completed.</param>
-public sealed record WorkflowFailureHook(
+/// <summary>A failure-hook row; InputJson/ResultJson hold the serialized JSON payloads.</summary>
+internal sealed record WorkflowFailureHook(
     Guid WorkflowRunId,
     int HookSequence,
     string ActivityName,

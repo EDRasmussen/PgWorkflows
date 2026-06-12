@@ -1,8 +1,13 @@
 namespace PgWorkflows.Persistence.Postgres;
 
+/// <summary>
+/// The idempotent DDL PgWorkflows applies on startup (when <c>ensureSchemaOnStart</c> is true).
+/// Exposed so deployments that run migrations themselves can apply it out-of-band instead.
+/// </summary>
 public static class PostgresSchema
 {
-    public const string Sql = """
+    /// <summary>The full schema script; safe to re-run, serialized by an advisory lock on startup.</summary>
+    public static readonly string Sql = """
         create table if not exists pw_activity_jobs (
             job_id uuid primary key,
             activity_name text not null,

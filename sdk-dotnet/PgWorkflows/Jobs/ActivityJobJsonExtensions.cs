@@ -3,7 +3,7 @@ using System.Text.Json.Serialization.Metadata;
 
 namespace PgWorkflows.Jobs;
 
-public static class ActivityJobJsonExtensions
+internal static class ActivityJobJsonExtensions
 {
     public static TOutput? GetResult<TOutput>(
         this ActivityJob job,

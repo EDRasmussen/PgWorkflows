@@ -1,7 +1,12 @@
 namespace PgWorkflows.Workers;
 
+/// <summary>
+/// Tunes the hosted activity worker. Configure via
+/// <see cref="PgWorkflows.PgWorkflowsBuilder.ConfigureActivityWorker"/>.
+/// </summary>
 public sealed record ActivityWorkerOptions
 {
+    /// <summary>Identifies this worker in leases and logs. Defaults to the machine name.</summary>
     public string WorkerId { get; init; } = Environment.MachineName;
 
     /// <summary>
@@ -19,10 +24,17 @@ public sealed record ActivityWorkerOptions
     /// </summary>
     public int MaxConcurrency { get; init; } = 10;
 
+    /// <summary>
+    /// How long a lease lives between heartbeats. The shared heartbeat renews all of a worker's
+    /// leases at a third of this interval; a worker that dies stops renewing and its jobs are
+    /// reclaimed once the lease expires.
+    /// </summary>
     public TimeSpan LeaseDuration { get; init; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>How often an idle worker polls for new jobs.</summary>
     public TimeSpan PollInterval { get; init; } = TimeSpan.FromMilliseconds(250);
 
+    /// <summary>Backoff between retry attempts, given the attempt number that just failed.</summary>
     public Func<int, TimeSpan> GetRetryDelay { get; init; } =
         static attempt => TimeSpan.FromSeconds(Math.Min(Math.Max(attempt, 1) * 5, 60));
 }

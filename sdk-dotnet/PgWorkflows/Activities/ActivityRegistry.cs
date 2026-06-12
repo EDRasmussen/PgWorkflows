@@ -4,7 +4,7 @@ using System.Text.Json.Serialization.Metadata;
 
 namespace PgWorkflows.Activities;
 
-public sealed class ActivityRegistry
+internal sealed class ActivityRegistry
 {
     private readonly ConcurrentDictionary<string, ActivityHandler> _handlers = new(
         StringComparer.Ordinal

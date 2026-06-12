@@ -45,7 +45,7 @@ await ctx.Activity(
 );
 ```
 
-<!-- TODO: full runnable version lives in PgWorkflows.ConsoleSample (CheckoutWorkflow);
+<!-- TODO: full runnable version lives in the example/ projects;
      state the execution order guarantee (reverse registration order?) and that
      registered compensations are themselves durable steps. -->
 

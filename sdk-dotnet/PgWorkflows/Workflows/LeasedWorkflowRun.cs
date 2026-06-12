@@ -1,14 +1,10 @@
 namespace PgWorkflows.Workflows;
 
-public sealed record LeasedWorkflowRun(
+internal sealed record LeasedWorkflowRun(
     Guid WorkflowRunId,
     string WorkflowName,
-    string? InputJson,
-    WorkflowStatus Status,
-    DateTimeOffset CreatedAt,
+    int Attempt,
+    int MaxAttempts,
     string LeaseToken,
-    DateTimeOffset LeaseExpiresAt,
-    string? IdempotencyKey = null,
-    int Attempt = 0,
-    int MaxAttempts = 1
+    DateTimeOffset LeaseExpiresAt
 );

@@ -1,0 +1,122 @@
+#nullable enable
+const PgWorkflows.PgWorkflowsTelemetry.ActivitySourceName = "PgWorkflows" -> string!
+override PgWorkflows.Activities.ActivityExecutionContext.Equals(object? obj) -> bool
+override PgWorkflows.Activities.ActivityExecutionContext.GetHashCode() -> int
+override PgWorkflows.Activities.ActivityExecutionContext.ToString() -> string!
+override PgWorkflows.Workers.ActivityWorkerOptions.Equals(object? obj) -> bool
+override PgWorkflows.Workers.ActivityWorkerOptions.GetHashCode() -> int
+override PgWorkflows.Workers.ActivityWorkerOptions.ToString() -> string!
+override PgWorkflows.Workers.WorkflowWorkerOptions.Equals(object? obj) -> bool
+override PgWorkflows.Workers.WorkflowWorkerOptions.GetHashCode() -> int
+override PgWorkflows.Workers.WorkflowWorkerOptions.ToString() -> string!
+PgWorkflows.Activities.ActivityAttribute
+PgWorkflows.Activities.ActivityAttribute.ActivityAttribute(string? name = null) -> void
+PgWorkflows.Activities.ActivityAttribute.Name.get -> string?
+PgWorkflows.Activities.ActivityExecutionContext
+PgWorkflows.Activities.ActivityExecutionContext.<Clone>$() -> PgWorkflows.Activities.ActivityExecutionContext!
+PgWorkflows.Activities.ActivityExecutionContext.ActivityExecutionContext(System.Guid JobId, string! ActivityName, int Attempt, System.DateTimeOffset CreatedAt) -> void
+PgWorkflows.Activities.ActivityExecutionContext.ActivityName.get -> string!
+PgWorkflows.Activities.ActivityExecutionContext.ActivityName.init -> void
+PgWorkflows.Activities.ActivityExecutionContext.Attempt.get -> int
+PgWorkflows.Activities.ActivityExecutionContext.Attempt.init -> void
+PgWorkflows.Activities.ActivityExecutionContext.CreatedAt.get -> System.DateTimeOffset
+PgWorkflows.Activities.ActivityExecutionContext.CreatedAt.init -> void
+PgWorkflows.Activities.ActivityExecutionContext.Deconstruct(out System.Guid JobId, out string! ActivityName, out int Attempt, out System.DateTimeOffset CreatedAt) -> void
+PgWorkflows.Activities.ActivityExecutionContext.Equals(PgWorkflows.Activities.ActivityExecutionContext? other) -> bool
+PgWorkflows.Activities.ActivityExecutionContext.JobId.get -> System.Guid
+PgWorkflows.Activities.ActivityExecutionContext.JobId.init -> void
+PgWorkflows.Persistence.Postgres.PostgresSchema
+PgWorkflows.PgWorkflowsBuilder
+PgWorkflows.PgWorkflowsBuilder.AddActivities<TActivities>(System.Text.Json.JsonSerializerOptions? jsonSerializerOptions = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.AddWorkflow<TWorkflow>() -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.ConfigureActivityWorker(System.Func<PgWorkflows.Workers.ActivityWorkerOptions!, PgWorkflows.Workers.ActivityWorkerOptions!>! configure) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.ConfigureWorkflowWorker(System.Func<PgWorkflows.Workers.WorkflowWorkerOptions!, PgWorkflows.Workers.WorkflowWorkerOptions!>! configure) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.DisableWorkers() -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.RegisterActivity<TInput, TOutput>(string! activityName, System.Func<PgWorkflows.Activities.ActivityExecutionContext!, TInput, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<TOutput>>! handler, System.Text.Json.JsonSerializerOptions? jsonSerializerOptions = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.RegisterActivity<TInput, TOutput>(string! activityName, System.Func<TInput, System.Threading.CancellationToken, System.Threading.Tasks.ValueTask<TOutput>>! handler, System.Text.Json.JsonSerializerOptions? jsonSerializerOptions = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.RegisterActivity<TInput, TOutput>(string! activityName, System.Func<TInput, System.Threading.Tasks.ValueTask<TOutput>>! handler, System.Text.Json.JsonSerializerOptions? jsonSerializerOptions = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.RegisterActivity<TInput, TOutput>(string! activityName, System.Func<TInput, TOutput>! handler, System.Text.Json.JsonSerializerOptions? jsonSerializerOptions = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.Services.get -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+PgWorkflows.PgWorkflowsBuilder.UsePostgres(Npgsql.NpgsqlDataSource! dataSource, bool ensureSchemaOnStart = true) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsBuilder.UsePostgres(string! connectionString, bool ensureSchemaOnStart = true, int? maxPoolSize = null) -> PgWorkflows.PgWorkflowsBuilder!
+PgWorkflows.PgWorkflowsServiceCollectionExtensions
+PgWorkflows.PgWorkflowsTelemetry
+PgWorkflows.Workers.ActivityWorkerOptions
+PgWorkflows.Workers.ActivityWorkerOptions.<Clone>$() -> PgWorkflows.Workers.ActivityWorkerOptions!
+PgWorkflows.Workers.ActivityWorkerOptions.ActivityWorkerOptions() -> void
+PgWorkflows.Workers.ActivityWorkerOptions.BatchSize.get -> int
+PgWorkflows.Workers.ActivityWorkerOptions.BatchSize.init -> void
+PgWorkflows.Workers.ActivityWorkerOptions.Equals(PgWorkflows.Workers.ActivityWorkerOptions? other) -> bool
+PgWorkflows.Workers.ActivityWorkerOptions.GetRetryDelay.get -> System.Func<int, System.TimeSpan>!
+PgWorkflows.Workers.ActivityWorkerOptions.GetRetryDelay.init -> void
+PgWorkflows.Workers.ActivityWorkerOptions.LeaseDuration.get -> System.TimeSpan
+PgWorkflows.Workers.ActivityWorkerOptions.LeaseDuration.init -> void
+PgWorkflows.Workers.ActivityWorkerOptions.MaxConcurrency.get -> int
+PgWorkflows.Workers.ActivityWorkerOptions.MaxConcurrency.init -> void
+PgWorkflows.Workers.ActivityWorkerOptions.PollInterval.get -> System.TimeSpan
+PgWorkflows.Workers.ActivityWorkerOptions.PollInterval.init -> void
+PgWorkflows.Workers.ActivityWorkerOptions.WorkerId.get -> string!
+PgWorkflows.Workers.ActivityWorkerOptions.WorkerId.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions
+PgWorkflows.Workers.WorkflowWorkerOptions.<Clone>$() -> PgWorkflows.Workers.WorkflowWorkerOptions!
+PgWorkflows.Workers.WorkflowWorkerOptions.BatchSize.get -> int
+PgWorkflows.Workers.WorkflowWorkerOptions.BatchSize.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.Equals(PgWorkflows.Workers.WorkflowWorkerOptions? other) -> bool
+PgWorkflows.Workers.WorkflowWorkerOptions.GetRetryDelay.get -> System.Func<int, System.TimeSpan>!
+PgWorkflows.Workers.WorkflowWorkerOptions.GetRetryDelay.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.LeaseDuration.get -> System.TimeSpan
+PgWorkflows.Workers.WorkflowWorkerOptions.LeaseDuration.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.MaxAttempts.get -> int
+PgWorkflows.Workers.WorkflowWorkerOptions.MaxAttempts.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.MaxConcurrency.get -> int
+PgWorkflows.Workers.WorkflowWorkerOptions.MaxConcurrency.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.ParkGrace.get -> System.TimeSpan
+PgWorkflows.Workers.WorkflowWorkerOptions.ParkGrace.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.PollInterval.get -> System.TimeSpan
+PgWorkflows.Workers.WorkflowWorkerOptions.PollInterval.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.WorkerId.get -> string!
+PgWorkflows.Workers.WorkflowWorkerOptions.WorkerId.init -> void
+PgWorkflows.Workers.WorkflowWorkerOptions.WorkflowWorkerOptions() -> void
+PgWorkflows.Workflows.IPgWorkflowClient
+PgWorkflows.Workflows.IPgWorkflowClient.ExecuteAsync<TWorkflow, TInput, TOutput>(TInput input, string? idempotencyKey = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput>
+PgWorkflows.Workflows.IPgWorkflowClient.SignalAsync<TSignal>(System.Guid workflowRunId, string! name, TSignal signal, string? idempotencyKey = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IPgWorkflowClient.StartAsync<TWorkflow, TInput, TOutput>(TInput input, string? idempotencyKey = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<PgWorkflows.Workflows.WorkflowHandle<TOutput>!>
+PgWorkflows.Workflows.IWorkflowContext
+PgWorkflows.Workflows.IWorkflowContext.Activity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.Task<TOutput>!>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.Activity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.ValueTask<TOutput>>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.Activity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, TOutput>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.CallActivity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.Task<TOutput>!>!>! activityCall) -> PgWorkflows.Workflows.WorkflowActivity<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.CallActivity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.ValueTask<TOutput>>!>! activityCall) -> PgWorkflows.Workflows.WorkflowActivity<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.CallActivity<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, TOutput>!>! activityCall) -> PgWorkflows.Workflows.WorkflowActivity<TOutput>
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.Task<TOutput>!>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.ValueTask<TOutput>>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities, TOutput>(System.Linq.Expressions.Expression<System.Func<TActivities, TOutput>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities>(System.Linq.Expressions.Expression<System.Action<TActivities>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.Task!>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.OnFailure<TActivities>(System.Linq.Expressions.Expression<System.Func<TActivities, System.Threading.Tasks.ValueTask>!>! activityCall, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.Sleep(System.TimeSpan duration, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.IWorkflowContext.WaitForSignal<TSignal>(string! name, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TSignal>
+PgWorkflows.Workflows.IWorkflowContext.WhenAll<T1, T2, T3>(PgWorkflows.Workflows.WorkflowActivity<T1> first, PgWorkflows.Workflows.WorkflowActivity<T2> second, PgWorkflows.Workflows.WorkflowActivity<T3> third, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<(T1 First, T2 Second, T3 Third)>
+PgWorkflows.Workflows.IWorkflowContext.WhenAll<T1, T2>(PgWorkflows.Workflows.WorkflowActivity<T1> first, PgWorkflows.Workflows.WorkflowActivity<T2> second, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<(T1 First, T2 Second)>
+PgWorkflows.Workflows.IWorkflowContext.WhenAll<TOutput>(System.Collections.Generic.IEnumerable<PgWorkflows.Workflows.WorkflowActivity<TOutput>>! activities, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput[]!>
+PgWorkflows.Workflows.IWorkflowContext.WorkflowRunId.get -> System.Guid
+PgWorkflows.Workflows.WorkflowActivity<TOutput>
+PgWorkflows.Workflows.WorkflowActivity<TOutput>.WorkflowActivity() -> void
+PgWorkflows.Workflows.WorkflowAttribute
+PgWorkflows.Workflows.WorkflowAttribute.Name.get -> string?
+PgWorkflows.Workflows.WorkflowAttribute.WorkflowAttribute(string? name = null) -> void
+PgWorkflows.Workflows.WorkflowHandle<TOutput>
+PgWorkflows.Workflows.WorkflowHandle<TOutput>.GetResultAsync(System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask<TOutput>
+PgWorkflows.Workflows.WorkflowHandle<TOutput>.SignalAsync<TSignal>(string! name, TSignal signal, string? idempotencyKey = null, System.Threading.CancellationToken cancellationToken = default(System.Threading.CancellationToken)) -> System.Threading.Tasks.ValueTask
+PgWorkflows.Workflows.WorkflowHandle<TOutput>.WorkflowRunId.get -> System.Guid
+PgWorkflows.Workflows.WorkflowRunAttribute
+PgWorkflows.Workflows.WorkflowRunAttribute.WorkflowRunAttribute() -> void
+static PgWorkflows.Activities.ActivityExecutionContext.operator !=(PgWorkflows.Activities.ActivityExecutionContext? left, PgWorkflows.Activities.ActivityExecutionContext? right) -> bool
+static PgWorkflows.Activities.ActivityExecutionContext.operator ==(PgWorkflows.Activities.ActivityExecutionContext? left, PgWorkflows.Activities.ActivityExecutionContext? right) -> bool
+static PgWorkflows.PgWorkflowsServiceCollectionExtensions.AddPgWorkflows(this Microsoft.Extensions.DependencyInjection.IServiceCollection! services, System.Action<PgWorkflows.PgWorkflowsBuilder!>? configure = null) -> Microsoft.Extensions.DependencyInjection.IServiceCollection!
+static PgWorkflows.Workers.ActivityWorkerOptions.operator !=(PgWorkflows.Workers.ActivityWorkerOptions? left, PgWorkflows.Workers.ActivityWorkerOptions? right) -> bool
+static PgWorkflows.Workers.ActivityWorkerOptions.operator ==(PgWorkflows.Workers.ActivityWorkerOptions? left, PgWorkflows.Workers.ActivityWorkerOptions? right) -> bool
+static PgWorkflows.Workers.WorkflowWorkerOptions.operator !=(PgWorkflows.Workers.WorkflowWorkerOptions? left, PgWorkflows.Workers.WorkflowWorkerOptions? right) -> bool
+static PgWorkflows.Workers.WorkflowWorkerOptions.operator ==(PgWorkflows.Workers.WorkflowWorkerOptions? left, PgWorkflows.Workers.WorkflowWorkerOptions? right) -> bool
+static readonly PgWorkflows.Persistence.Postgres.PostgresSchema.Sql -> string!
+static readonly PgWorkflows.PgWorkflowsTelemetry.ActivitySource -> System.Diagnostics.ActivitySource!

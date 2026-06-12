@@ -1,6 +1,6 @@
 namespace PgWorkflows.Jobs;
 
-public enum JobStatus
+internal enum JobStatus
 {
     Pending = 0,
     Leased = 1,

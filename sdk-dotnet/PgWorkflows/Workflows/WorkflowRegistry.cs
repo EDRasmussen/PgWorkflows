@@ -4,7 +4,7 @@ using PgWorkflows.Internal;
 
 namespace PgWorkflows.Workflows;
 
-public sealed class WorkflowRegistry
+internal sealed class WorkflowRegistry
 {
     private readonly object _gate = new();
     private readonly Dictionary<Type, WorkflowDefinition> _definitions = [];

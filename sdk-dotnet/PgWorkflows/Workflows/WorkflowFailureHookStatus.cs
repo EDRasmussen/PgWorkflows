@@ -1,6 +1,6 @@
 namespace PgWorkflows.Workflows;
 
-public enum WorkflowFailureHookStatus
+internal enum WorkflowFailureHookStatus
 {
     Registered,
     Scheduled,

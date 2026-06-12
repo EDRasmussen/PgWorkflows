@@ -7,8 +7,14 @@ using PgWorkflows.Workers;
 
 namespace PgWorkflows;
 
+/// <summary>Service collection registration for PgWorkflows.</summary>
 public static class PgWorkflowsServiceCollectionExtensions
 {
+    /// <summary>
+    /// Adds PgWorkflows to the service collection: the <see cref="Workflows.IPgWorkflowClient"/>,
+    /// the Postgres-backed stores, and (unless <see cref="PgWorkflowsBuilder.DisableWorkers"/> is
+    /// called) hosted activity and workflow workers that start with the application.
+    /// </summary>
     public static IServiceCollection AddPgWorkflows(
         this IServiceCollection services,
         Action<PgWorkflowsBuilder>? configure = null

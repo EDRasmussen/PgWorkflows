@@ -1,10 +1,8 @@
 namespace PgWorkflows.Workflows;
 
-/// <param name="InputJson">Serialized JSON stored as the workflow run input.</param>
-public sealed record CreateWorkflowRunRequest(
+/// <summary>InputJson is the serialized JSON stored as the workflow run input.</summary>
+internal sealed record CreateWorkflowRunRequest(
     string WorkflowName,
     string? InputJson,
-    string? IdempotencyKey = null,
-    int MaxAttempts = 1,
-    DateTimeOffset? VisibleAt = null
+    string? IdempotencyKey = null
 );

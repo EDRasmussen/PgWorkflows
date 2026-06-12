@@ -1,6 +1,6 @@
 namespace PgWorkflows.Workflows;
 
-public enum WorkflowStepStatus
+internal enum WorkflowStepStatus
 {
     Scheduled,
     Succeeded,

@@ -4,7 +4,7 @@ using PgWorkflows.Workflows;
 
 namespace PgWorkflows.Persistence.Postgres;
 
-public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkflowStore
+internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkflowStore
 {
     private readonly NpgsqlDataSource _dataSource =
         dataSource ?? throw new ArgumentNullException(nameof(dataSource));
@@ -26,7 +26,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
 
         var workflowRunId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
-        var visibleAt = request.VisibleAt ?? now;
 
         const string sql = """
             insert into pw_workflow_runs (
@@ -78,8 +77,8 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         );
         command.Parameters.AddWithValue("status", PendingStatus);
         command.Parameters.AddWithValue("attempt", 0);
-        command.Parameters.AddWithValue("max_attempts", Math.Max(request.MaxAttempts, 1));
-        command.Parameters.AddWithValue("visible_at", visibleAt);
+        command.Parameters.AddWithValue("max_attempts", 1);
+        command.Parameters.AddWithValue("visible_at", now);
         command.Parameters.AddWithValue("created_at", now);
         command.Parameters.AddWithValue("updated_at", now);
 
@@ -178,12 +177,8 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             returning
                 runs.workflow_run_id,
                 runs.workflow_name,
-                runs.idempotency_key,
-                runs.input,
-                runs.status,
                 runs.attempt,
                 runs.max_attempts,
-                runs.created_at,
                 runs.lease_token,
                 runs.lease_expires_at;
             """;
@@ -1329,14 +1324,10 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         new(
             reader.GetGuid(0),
             reader.GetString(1),
-            ReadNullableString(reader, 3),
-            ReadRunStatus(reader.GetString(4)),
-            reader.GetFieldValue<DateTimeOffset>(7),
-            reader.GetString(8),
-            reader.GetFieldValue<DateTimeOffset>(9),
-            ReadNullableString(reader, 2),
-            reader.GetInt32(5),
-            reader.GetInt32(6)
+            reader.GetInt32(2),
+            reader.GetInt32(3),
+            reader.GetString(4),
+            reader.GetFieldValue<DateTimeOffset>(5)
         );
 
     private static WorkflowStatus ReadRunStatus(string value) =>

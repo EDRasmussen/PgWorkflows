@@ -1,6 +1,6 @@
 namespace PgWorkflows.Workflows;
 
-public enum WorkflowStatus
+internal enum WorkflowStatus
 {
     Pending,
     Running,

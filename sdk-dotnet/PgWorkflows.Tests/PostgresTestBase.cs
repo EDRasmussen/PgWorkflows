@@ -21,9 +21,9 @@ public abstract class PostgresTestBase : IAsyncLifetime
 
     protected NpgsqlDataSource DataSource => _dataSource;
 
-    protected PostgresActivityJobStore Store { get; private set; } = default!;
+    internal PostgresActivityJobStore Store { get; private set; } = default!;
 
-    protected PostgresWorkflowStore WorkflowStore { get; private set; } = default!;
+    internal PostgresWorkflowStore WorkflowStore { get; private set; } = default!;
 
     public async Task InitializeAsync()
     {

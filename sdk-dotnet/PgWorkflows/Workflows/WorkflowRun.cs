@@ -1,8 +1,7 @@
 namespace PgWorkflows.Workflows;
 
-/// <param name="InputJson">Serialized JSON supplied when the workflow run was created.</param>
-/// <param name="ResultJson">Serialized JSON recorded when the workflow run completed.</param>
-public sealed record WorkflowRun(
+/// <summary>A workflow run row; InputJson/ResultJson hold the serialized JSON payloads.</summary>
+internal sealed record WorkflowRun(
     Guid WorkflowRunId,
     string WorkflowName,
     string? InputJson,

@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["sdk-dotnet/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["sdk-dotnet/**", ".github/workflows/ci.yml"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build
+        run: dotnet build sdk-dotnet --configuration Release
+
+      - name: Test
+        run: dotnet test sdk-dotnet --configuration Release --no-build --logger "console;verbosity=normal"
+
+      - name: Pack (validates package metadata on every change)
+        run: dotnet pack sdk-dotnet/PgWorkflows/PgWorkflows.csproj --configuration Release --no-build

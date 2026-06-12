@@ -11,6 +11,11 @@ using PgWorkflows.Workflows;
 
 namespace PgWorkflows;
 
+/// <summary>
+/// Fluent configuration surface for <c>AddPgWorkflows(pg =&gt; ...)</c>: point PgWorkflows at a
+/// database with <see cref="UsePostgres(string, bool, int?)"/>, register workflows and
+/// activities, and tune the hosted workers.
+/// </summary>
 public sealed class PgWorkflowsBuilder
 {
     private readonly ActivityRegistry _registry;
@@ -29,6 +34,7 @@ public sealed class PgWorkflowsBuilder
             workflowRegistry ?? throw new ArgumentNullException(nameof(workflowRegistry));
     }
 
+    /// <summary>The service collection being configured, for advanced composition.</summary>
     public IServiceCollection Services { get; }
 
     internal bool EnsurePostgresSchemaOnStart { get; private set; }
@@ -73,11 +79,17 @@ public sealed class PgWorkflowsBuilder
     /// </summary>
     internal const int DefaultMaxPoolSize = 20;
 
+    /// <summary>
+    /// Points PgWorkflows at your Postgres database. Creates the schema on startup by default and
+    /// sizes the connection pool to the configured worker concurrency unless overridden.
+    /// </summary>
+    /// <param name="connectionString">The Npgsql connection string.</param>
+    /// <param name="ensureSchemaOnStart">Apply the PgWorkflows schema idempotently at startup.</param>
     /// <param name="maxPoolSize">
     /// Maximum number of pooled connections this process opens. When null, the pool is sized to fit
-    /// the worker concurrency (activity + workflow + headroom), or <see cref="DefaultMaxPoolSize"/>
-    /// for a client-only process. A <c>Maximum Pool Size</c> in the connection string also counts as
-    /// an explicit override.
+    /// the worker concurrency (activity + workflow + headroom), or a small default for a
+    /// client-only process. A <c>Maximum Pool Size</c> in the connection string also counts as an
+    /// explicit override.
     /// </param>
     public PgWorkflowsBuilder UsePostgres(
         string connectionString,
@@ -100,6 +112,11 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>
+    /// Points PgWorkflows at a pre-built <see cref="NpgsqlDataSource"/>. The data source owns its
+    /// own pool, which is validated against the configured worker concurrency (failing fast if
+    /// too small) but never resized.
+    /// </summary>
     public PgWorkflowsBuilder UsePostgres(
         NpgsqlDataSource dataSource,
         bool ensureSchemaOnStart = true
@@ -190,6 +207,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>Tunes the hosted activity worker, e.g. <c>options =&gt; options with { MaxConcurrency = 32 }</c>.</summary>
     public PgWorkflowsBuilder ConfigureActivityWorker(
         Func<ActivityWorkerOptions, ActivityWorkerOptions> configure
     )
@@ -203,6 +221,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>Tunes the hosted workflow worker, e.g. <c>options =&gt; options with { MaxAttempts = 3 }</c>.</summary>
     public PgWorkflowsBuilder ConfigureWorkflowWorker(
         Func<WorkflowWorkerOptions, WorkflowWorkerOptions> configure
     )
@@ -216,6 +235,11 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>
+    /// Registers a single delegate-based activity under an explicit durable name — a low-level
+    /// escape hatch next to <see cref="AddActivities{TActivities}"/>. Input and output are
+    /// JSON-serialized at the boundary.
+    /// </summary>
     public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, TOutput> handler,
@@ -226,6 +250,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <inheritdoc cref="RegisterActivity{TInput, TOutput}(string, Func{TInput, TOutput}, JsonSerializerOptions?)"/>
     public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, ValueTask<TOutput>> handler,
@@ -236,6 +261,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <inheritdoc cref="RegisterActivity{TInput, TOutput}(string, Func{TInput, TOutput}, JsonSerializerOptions?)"/>
     public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<TInput, CancellationToken, ValueTask<TOutput>> handler,
@@ -246,6 +272,7 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <inheritdoc cref="RegisterActivity{TInput, TOutput}(string, Func{TInput, TOutput}, JsonSerializerOptions?)"/>
     public PgWorkflowsBuilder RegisterActivity<TInput, TOutput>(
         string activityName,
         Func<ActivityExecutionContext, TInput, CancellationToken, ValueTask<TOutput>> handler,
@@ -256,6 +283,11 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>
+    /// Registers every public <c>[Activity]</c> method on <typeparamref name="TActivities"/>.
+    /// Instances are resolved from DI per execution; methods can be sync, Task, or ValueTask,
+    /// with multiple parameters and an optional trailing CancellationToken.
+    /// </summary>
     public PgWorkflowsBuilder AddActivities<TActivities>(
         JsonSerializerOptions? jsonSerializerOptions = null
     )
@@ -267,6 +299,10 @@ public sealed class PgWorkflowsBuilder
         return this;
     }
 
+    /// <summary>
+    /// Registers a <c>[Workflow]</c> class so it can be started through
+    /// <see cref="IPgWorkflowClient"/> and executed by the workflow worker.
+    /// </summary>
     public PgWorkflowsBuilder AddWorkflow<TWorkflow>()
         where TWorkflow : class
     {

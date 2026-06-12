@@ -1,8 +1,7 @@
 namespace PgWorkflows.Workflows;
 
-/// <param name="InputJson">Serialized JSON supplied to the activity step.</param>
-/// <param name="ResultJson">Serialized JSON recorded when the activity step completed.</param>
-public sealed record WorkflowStep(
+/// <summary>A step-ledger row; InputJson/ResultJson hold the serialized JSON payloads.</summary>
+internal sealed record WorkflowStep(
     Guid WorkflowRunId,
     int StepSequence,
     string ActivityName,

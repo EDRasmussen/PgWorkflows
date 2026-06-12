@@ -1,0 +1,40 @@
+name: Release to NuGet
+
+# To publish: git tag v0.1.0 && git push origin v0.1.0 (tag must match <Version> in the csproj).
+# Requires the NUGET_API_KEY repository secret (nuget.org > API keys).
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: nuget
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Verify tag matches csproj version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          CSPROJ_VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' sdk-dotnet/PgWorkflows/PgWorkflows.csproj)
+          if [ "$TAG_VERSION" != "$CSPROJ_VERSION" ]; then
+            echo "Tag v$TAG_VERSION does not match csproj <Version>$CSPROJ_VERSION</Version>" >&2
+            exit 1
+          fi
+
+      - name: Build
+        run: dotnet build sdk-dotnet --configuration Release
+
+      - name: Test
+        run: dotnet test sdk-dotnet --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack sdk-dotnet/PgWorkflows/PgWorkflows.csproj --configuration Release --no-build --output ./artifacts
+
+      - name: Push to nuget.org
+        run: dotnet nuget push ./artifacts/*.nupkg --api-key "${{ secrets.NUGET_API_KEY }}" --source https://api.nuget.org/v3/index.json --skip-duplicate

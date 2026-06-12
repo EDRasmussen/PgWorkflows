@@ -1,8 +1,7 @@
 namespace PgWorkflows.Jobs;
 
-/// <param name="InputJson">Serialized JSON read from the activity job's input payload.</param>
-/// <param name="ResultJson">Serialized JSON read from the activity job's result payload.</param>
-public record ActivityJob(
+/// <summary>An activity job row; InputJson/ResultJson hold the serialized JSON payloads.</summary>
+internal record ActivityJob(
     Guid JobId,
     string ActivityName,
     string? InputJson,

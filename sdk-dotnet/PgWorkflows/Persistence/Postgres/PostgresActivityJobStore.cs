@@ -4,7 +4,7 @@ using PgWorkflows.Jobs;
 
 namespace PgWorkflows.Persistence.Postgres;
 
-public sealed class PostgresActivityJobStore : IActivityJobStore
+internal sealed class PostgresActivityJobStore : IActivityJobStore
 {
     private readonly NpgsqlDataSource _dataSource;
 
@@ -173,7 +173,6 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             returning
                 jobs.job_id,
                 jobs.activity_name,
-                jobs.idempotency_key,
                 jobs.input,
                 jobs.attempt,
                 jobs.max_attempts,
@@ -200,13 +199,12 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
                 new LeasedActivityJob(
                     reader.GetGuid(0),
                     reader.GetString(1),
-                    ReadNullableString(reader, 3),
+                    ReadNullableString(reader, 2),
+                    reader.GetInt32(3),
                     reader.GetInt32(4),
-                    reader.GetInt32(5),
-                    reader.GetFieldValue<DateTimeOffset>(6),
-                    reader.GetString(7),
-                    reader.GetFieldValue<DateTimeOffset>(8),
-                    ReadNullableString(reader, 2)
+                    reader.GetFieldValue<DateTimeOffset>(5),
+                    reader.GetString(6),
+                    reader.GetFieldValue<DateTimeOffset>(7)
                 )
             );
         }
