@@ -509,9 +509,7 @@ public sealed class PgWorkflowsBuilder
         Services.AddSingleton<WorkflowWorker>();
         Services.AddSingleton<IPgWorkflowClient>(provider => new PgWorkflowClient(
             provider.GetRequiredService<WorkflowRegistry>(),
-            provider.GetRequiredService<WorkflowRunner>(),
-            provider,
-            executeWorkflowsInCaller: false
+            provider.GetRequiredService<WorkflowRunner>()
         ));
     }
 }

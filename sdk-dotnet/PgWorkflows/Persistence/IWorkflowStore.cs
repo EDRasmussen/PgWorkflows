@@ -20,8 +20,6 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
-    ValueTask MarkRunRunningAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
-
     ValueTask<bool> RenewRunLeaseAsync(
         Guid workflowRunId,
         string leaseToken,
@@ -52,12 +50,6 @@ internal interface IWorkflowStore
         Guid workflowRunId,
         string leaseToken,
         DateTimeOffset visibleAt,
-        CancellationToken cancellationToken = default
-    );
-
-    ValueTask RecordRunSuccessAsync(
-        Guid workflowRunId,
-        string? resultJson,
         CancellationToken cancellationToken = default
     );
 
@@ -113,12 +105,6 @@ internal interface IWorkflowStore
         int waitSequence,
         string signalName,
         string leaseToken,
-        CancellationToken cancellationToken = default
-    );
-
-    ValueTask RecordRunFailureAsync(
-        Guid workflowRunId,
-        string error,
         CancellationToken cancellationToken = default
     );
 

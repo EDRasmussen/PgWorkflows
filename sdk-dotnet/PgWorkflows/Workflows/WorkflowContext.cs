@@ -10,8 +10,7 @@ internal sealed class WorkflowContext(
     IWorkflowStore workflowStore,
     IActivityJobStore activityStore,
     JsonSerializerOptions? jsonSerializerOptions,
-    TimeSpan activityPollInterval,
-    string? leaseToken
+    string leaseToken
 ) : IWorkflowContext
 {
     private readonly IWorkflowStore _workflowStore =
@@ -19,16 +18,14 @@ internal sealed class WorkflowContext(
     private readonly IActivityJobStore _activityStore =
         activityStore ?? throw new ArgumentNullException(nameof(activityStore));
     private readonly JsonSerializerOptions? _jsonSerializerOptions = jsonSerializerOptions;
-    private readonly TimeSpan _activityPollInterval = activityPollInterval;
 
     /// <summary>
-    /// The run's lease token when executed by the workflow worker, which is the only context that
-    /// may release its lease and park (suspend) the run — for <c>ctx.Sleep</c>,
-    /// <c>ctx.WaitForSignal</c>, and while waiting on activity steps. Inline (non-leased) execution
-    /// holds no lease, so it block-polls instead.
+    /// The run's lease token under the executing workflow worker. Parking (suspending) the run —
+    /// for <c>ctx.Sleep</c>, <c>ctx.WaitForSignal</c>, and while waiting on activity steps —
+    /// releases this lease, guarded by the token so a lost lease writes nothing.
     /// </summary>
-    private readonly string? _leaseToken = leaseToken;
-    private readonly bool _canPark = leaseToken is not null;
+    private readonly string _leaseToken =
+        leaseToken ?? throw new ArgumentNullException(nameof(leaseToken));
     private int _nextStepSequence;
     private int _nextFailureHookSequence;
     private int _nextTimerSequence;
@@ -46,14 +43,6 @@ internal sealed class WorkflowContext(
 
     public async ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default)
     {
-        if (!_canPark)
-        {
-            throw new NotSupportedException(
-                "ctx.Sleep is only supported when the workflow is executed by the workflow worker, "
-                    + "not when executed inline in the caller."
-            );
-        }
-
         var timerSequence = _nextTimerSequence++;
 
         // Read-only: the deadline is persisted atomically with the park (RecordRunSleepingAsync),
@@ -87,20 +76,13 @@ internal sealed class WorkflowContext(
     )
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        if (!_canPark)
-        {
-            throw new NotSupportedException(
-                "ctx.WaitForSignal is only supported when the workflow is executed by the workflow "
-                    + "worker, not when executed inline in the caller."
-            );
-        }
 
         var signalSequence = _nextSignalSequence++;
         var payloadJson = await _workflowStore.ConsumeSignalAsync(
             WorkflowRunId,
             signalSequence,
             name,
-            _leaseToken!,
+            _leaseToken,
             cancellationToken
         );
 
@@ -229,39 +211,28 @@ internal sealed class WorkflowContext(
             cancellationToken
         );
 
-        if (_canPark)
-        {
-            var resolutions = new StepResolution<TOutput>[handles.Length];
-            var outcomes = new StepOutcome[handles.Length];
-            for (var index = 0; index < handles.Length; index++)
-            {
-                resolutions[index] = await ResolveStepAsync<TOutput>(
-                    handles[index],
-                    cancellationToken
-                );
-                outcomes[index] = resolutions[index].ToOutcome(handles[index].Sequence);
-            }
-
-            // Parks if any sibling is outstanding, else records all and throws the lowest-sequence
-            // failure; only returns here when every sibling succeeded.
-            await CommitFanOutAsync(outcomes, cancellationToken);
-
-            var results = new TOutput[handles.Length];
-            for (var index = 0; index < handles.Length; index++)
-            {
-                results[index] = resolutions[index].Value;
-            }
-
-            return results;
-        }
-
-        var tasks = new Task<TOutput>[handles.Length];
+        var resolutions = new StepResolution<TOutput>[handles.Length];
+        var outcomes = new StepOutcome[handles.Length];
         for (var index = 0; index < handles.Length; index++)
         {
-            tasks[index] = BlockPollStepAsync<TOutput>(handles[index], cancellationToken).AsTask();
+            resolutions[index] = await ResolveStepAsync<TOutput>(
+                handles[index],
+                cancellationToken
+            );
+            outcomes[index] = resolutions[index].ToOutcome(handles[index].Sequence);
         }
 
-        return await Task.WhenAll(tasks);
+        // Parks if any sibling is outstanding, else records all and throws the lowest-sequence
+        // failure; only returns here when every sibling succeeded.
+        await CommitFanOutAsync(outcomes, cancellationToken);
+
+        var results = new TOutput[handles.Length];
+        for (var index = 0; index < handles.Length; index++)
+        {
+            results[index] = resolutions[index].Value;
+        }
+
+        return results;
     }
 
     public async ValueTask<(T1 First, T2 Second)> WhenAll<T1, T2>(
@@ -277,21 +248,13 @@ internal sealed class WorkflowContext(
             cancellationToken
         );
 
-        if (_canPark)
-        {
-            var first2 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
-            var second2 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
-            await CommitFanOutAsync(
-                [first2.ToOutcome(handles[0].Sequence), second2.ToOutcome(handles[1].Sequence)],
-                cancellationToken
-            );
-            return (first2.Value, second2.Value);
-        }
-
-        var firstTask = BlockPollStepAsync<T1>(handles[0], cancellationToken).AsTask();
-        var secondTask = BlockPollStepAsync<T2>(handles[1], cancellationToken).AsTask();
-        await Task.WhenAll(firstTask, secondTask);
-        return (await firstTask, await secondTask);
+        var first2 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
+        var second2 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
+        await CommitFanOutAsync(
+            [first2.ToOutcome(handles[0].Sequence), second2.ToOutcome(handles[1].Sequence)],
+            cancellationToken
+        );
+        return (first2.Value, second2.Value);
     }
 
     public async ValueTask<(T1 First, T2 Second, T3 Third)> WhenAll<T1, T2, T3>(
@@ -308,27 +271,18 @@ internal sealed class WorkflowContext(
             cancellationToken
         );
 
-        if (_canPark)
-        {
-            var first3 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
-            var second3 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
-            var third3 = await ResolveStepAsync<T3>(handles[2], cancellationToken);
-            await CommitFanOutAsync(
-                [
-                    first3.ToOutcome(handles[0].Sequence),
-                    second3.ToOutcome(handles[1].Sequence),
-                    third3.ToOutcome(handles[2].Sequence),
-                ],
-                cancellationToken
-            );
-            return (first3.Value, second3.Value, third3.Value);
-        }
-
-        var firstTask = BlockPollStepAsync<T1>(handles[0], cancellationToken).AsTask();
-        var secondTask = BlockPollStepAsync<T2>(handles[1], cancellationToken).AsTask();
-        var thirdTask = BlockPollStepAsync<T3>(handles[2], cancellationToken).AsTask();
-        await Task.WhenAll(firstTask, secondTask, thirdTask);
-        return (await firstTask, await secondTask, await thirdTask);
+        var first3 = await ResolveStepAsync<T1>(handles[0], cancellationToken);
+        var second3 = await ResolveStepAsync<T2>(handles[1], cancellationToken);
+        var third3 = await ResolveStepAsync<T3>(handles[2], cancellationToken);
+        await CommitFanOutAsync(
+            [
+                first3.ToOutcome(handles[0].Sequence),
+                second3.ToOutcome(handles[1].Sequence),
+                third3.ToOutcome(handles[2].Sequence),
+            ],
+            cancellationToken
+        );
+        return (first3.Value, second3.Value, third3.Value);
     }
 
     private async ValueTask<TOutput> RunActivityStepAsync<TOutput>(
@@ -338,11 +292,6 @@ internal sealed class WorkflowContext(
     {
         var stepSequence = ReserveStepSequences(1);
         var handle = await EnsureStepScheduledAsync(stepSequence, activityCall, cancellationToken);
-
-        if (!_canPark)
-        {
-            return await BlockPollStepAsync<TOutput>(handle, cancellationToken);
-        }
 
         var resolution = await ResolveStepAsync<TOutput>(handle, cancellationToken);
         if (!resolution.Ready)
@@ -563,37 +512,6 @@ internal sealed class WorkflowContext(
             throw new InvalidOperationException(
                 $"Workflow activity step {first.Sequence} failed: {first.Error}"
             );
-        }
-    }
-
-    /// <summary>
-    /// Block-polls a single already-scheduled step to completion. Used only for inline (non-leased)
-    /// execution, which cannot park; the activity still runs on any activity worker.
-    /// </summary>
-    private async ValueTask<TOutput> BlockPollStepAsync<TOutput>(
-        StepHandle handle,
-        CancellationToken cancellationToken
-    )
-    {
-        while (true)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            var resolution = await ResolveStepAsync<TOutput>(handle, cancellationToken);
-            if (resolution.Ready)
-            {
-                await FinalizeOutcomeAsync(resolution.ToOutcome(handle.Sequence), cancellationToken);
-                if (resolution.Error is { } error)
-                {
-                    throw new InvalidOperationException(
-                        $"Workflow activity step {handle.Sequence} failed: {error}"
-                    );
-                }
-
-                return resolution.Value;
-            }
-
-            await Task.Delay(_activityPollInterval, cancellationToken);
         }
     }
 

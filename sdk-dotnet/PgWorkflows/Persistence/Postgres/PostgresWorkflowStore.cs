@@ -209,19 +209,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return runs;
     }
 
-    public ValueTask MarkRunRunningAsync(
-        Guid workflowRunId,
-        CancellationToken cancellationToken = default
-    ) =>
-        UpdateRunAsync(
-            workflowRunId,
-            RunningStatus,
-            resultJson: null,
-            error: null,
-            completedAt: null,
-            cancellationToken
-        );
-
     public async ValueTask<bool> RenewRunLeaseAsync(
         Guid workflowRunId,
         string leaseToken,
@@ -317,20 +304,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
 
-    public ValueTask RecordRunSuccessAsync(
-        Guid workflowRunId,
-        string? resultJson,
-        CancellationToken cancellationToken = default
-    ) =>
-        UpdateRunAsync(
-            workflowRunId,
-            SucceededStatus,
-            resultJson,
-            error: null,
-            completedAt: DateTimeOffset.UtcNow,
-            cancellationToken
-        );
-
     public ValueTask<bool> RecordRunSuccessAsync(
         Guid workflowRunId,
         string? resultJson,
@@ -346,24 +319,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             completedAt: DateTimeOffset.UtcNow,
             cancellationToken
         );
-
-    public ValueTask RecordRunFailureAsync(
-        Guid workflowRunId,
-        string error,
-        CancellationToken cancellationToken = default
-    )
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(error);
-
-        return UpdateRunAsync(
-            workflowRunId,
-            FailedStatus,
-            resultJson: null,
-            error,
-            completedAt: DateTimeOffset.UtcNow,
-            cancellationToken
-        );
-    }
 
     public ValueTask<bool> RecordRunFailureAsync(
         Guid workflowRunId,
@@ -1230,41 +1185,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             completedAt: DateTimeOffset.UtcNow,
             cancellationToken
         );
-    }
-
-    private async ValueTask UpdateRunAsync(
-        Guid workflowRunId,
-        string status,
-        string? resultJson,
-        string? error,
-        DateTimeOffset? completedAt,
-        CancellationToken cancellationToken
-    )
-    {
-        const string sql = $"""
-            update pw_workflow_runs
-            set status = @status,
-                updated_at = @updated_at,
-                completed_at = @completed_at,
-                result = @result,
-                error = @error,
-                {LeaseReleaseColumns}
-            where workflow_run_id = @workflow_run_id;
-            """;
-
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
-        command.Parameters.AddWithValue("status", status);
-        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
-        command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue(
-            "result",
-            NpgsqlDbType.Jsonb,
-            (object?)resultJson ?? DBNull.Value
-        );
-        command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
-
-        await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private async ValueTask<bool> UpdateLeasedRunAsync(
