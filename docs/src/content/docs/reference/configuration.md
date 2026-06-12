@@ -27,7 +27,27 @@ builder.Services.AddPgWorkflows(pg =>
 | `AddActivities<TActivities>()` | Register an activity class (all `[Activity]` methods). |
 | `RegisterActivity<TInput, TOutput>(...)` | Register a single delegate-based activity. |
 
-<!-- TODO: document the second UsePostgres overload and RegisterActivity variants. -->
+`UsePostgres` also accepts a pre-built `NpgsqlDataSource` instead of a connection string,
+for apps that already manage their own data source; its pool settings are used as-is and
+validated against the worker concurrency.
+
+`RegisterActivity` is the low-level escape hatch next to `AddActivities`: it binds a
+delegate to an explicit durable name. Overloads accept sync or async delegates, an
+optional `CancellationToken`, and an optional `ActivityExecutionContext` first parameter
+carrying the job id and attempt number.
+
+## Schema migrations
+
+The schema is versioned. On startup (with `ensureSchemaOnStart: true`, the default),
+PgWorkflows checks the `pw_schema_migrations` table and applies only the migrations your
+database is missing, in order, inside a transaction guarded by an advisory lock; a whole
+fleet starting at once applies them exactly once. Upgrading the package and restarting
+is the entire upgrade procedure.
+
+To apply migrations out-of-band instead (a deploy pipeline, a DBA), pass
+`ensureSchemaOnStart: false` and use `PostgresSchema.Migrations`: execute each pending
+migration's `Sql` and insert its row into `pw_schema_migrations(version, name,
+applied_at)` in the same transaction.
 
 ## Connection pooling
 
@@ -84,4 +104,6 @@ migrations, dashboards, and ad-hoc connections.
 | `PollInterval` | 250 ms | How often an idle worker polls for work. |
 | `GetRetryDelay` | `min(attempt × 5 s, 60 s)` | Backoff between activity retry attempts. |
 
-<!-- TODO: where does activity MaxAttempts live? Document once decided/confirmed. -->
+There is no per-activity retry budget yet: an activity called from a workflow gets a
+single execution attempt, and its failure surfaces to the workflow (see
+[error handling](/error-handling/)). Configurable activity retries are planned.

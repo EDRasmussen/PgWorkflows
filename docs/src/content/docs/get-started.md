@@ -8,11 +8,10 @@ connection string.
 
 ## Prerequisites
 
-<!-- TODO: .NET version, a reachable Postgres instance (any flavor: local, RDS, Supabase, ...). -->
+- .NET 8.0 or later
+- A reachable Postgres instance (any flavor: local, Docker, RDS, Supabase, Neon)
 
 ## Install
-
-<!-- TODO: NuGet install command once the package is published. -->
 
 ```sh
 dotnet add package PgWorkflows
@@ -31,7 +30,9 @@ builder.Services.AddPgWorkflows(pg =>
 );
 ```
 
-<!-- TODO: mention ensureSchemaOnStart: the schema is created automatically on startup by default. -->
+The tables PgWorkflows needs are created automatically on startup (idempotently, safe
+across many instances starting at once). Pass `ensureSchemaOnStart: false` to
+`UsePostgres` if your deployment applies schema out-of-band instead.
 
 ## Define a workflow and its activities
 
@@ -69,7 +70,19 @@ var workflows = app.Services.GetRequiredService<IPgWorkflowClient>();
 var result = await workflows.ExecuteAsync<GreetingWorkflow, string, string>("Postgres");
 ```
 
-<!-- TODO: expected console output, and a pointer to the tables created in Postgres so readers can peek at the state. -->
+`result` is `"Hello, Postgres!"`. The interesting part is what's now in your database.
+The run, its durable step, and the activity job are all plain rows:
+
+```sql
+select workflow_name, status, result from pw_workflow_runs;
+
+ workflow_name | status    | result
+---------------+-----------+---------------------
+ greeting      | succeeded | "Hello, Postgres!"
+```
+
+Everything PgWorkflows knows lives in tables like this one; see
+[what's in your database](/how-it-works/#whats-in-your-database) for the tour.
 
 ## Next steps
 

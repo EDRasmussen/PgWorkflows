@@ -33,14 +33,22 @@ var results = await ctx.WhenAll(
 );
 ```
 
-<!-- TODO: verify/polish the collection example; show realistic input. -->
+The whole batch is enqueued together, so activity workers pick the branches up side by
+side; how many actually run at once is bounded by your workers' `MaxConcurrency`.
 
 ## What happens on failure?
 
-<!-- TODO: semantics when one branch fails: what happens to the others, how retries
-     interact with WhenAll. -->
+`ctx.WhenAll` matches `Task.WhenAll` semantics: it waits for **every** branch to finish
+before surfacing anything, then throws the first failure (by position). Branches that
+succeeded keep their recorded results; they are memoized like any other step and won't
+re-run. The failure then propagates like any workflow failure: the run fails (after its
+[workflow-level attempts](/error-handling/)) and any registered
+[compensations](/error-handling/#compensation-with-ctxonfailure) run.
 
 ## How it stays durable
 
-<!-- TODO: each branch is its own persisted step; the run parks while branches execute
-     and wakes when the last one completes. -->
+Each branch is its own persisted step backed by its own activity job, so a fan-out of
+fifty is fifty rows, each completing and memoizing independently. While branches
+execute, the run parks without holding a worker slot, and the completion of the last
+outstanding branch wakes it. A crash mid-fan-out resumes exactly: finished branches
+replay from their stored results, and unfinished ones are simply waited for again.

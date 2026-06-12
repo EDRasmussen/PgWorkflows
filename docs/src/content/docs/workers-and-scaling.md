@@ -76,12 +76,13 @@ since activities only matter where they execute.
 ## Tuning
 
 All knobs and defaults are in the [configuration reference](/reference/configuration/).
-Two worth knowing early:
+Three worth knowing early:
 
 - `WorkerId` defaults to the machine name; set it explicitly in containers so leases
   are attributable when debugging.
-- Activity `MaxConcurrency` defaults to four per processor (IO-friendly); lower it for
-  CPU-bound work.
-- Each process holds its own connection pool, capped at 20 by default. The sum across
-  all API and worker processes must stay below Postgres' `max_connections`; see
+- `MaxConcurrency` defaults to 10 per worker kind; raise it for IO-heavy fleets, lower
+  it for CPU-bound work.
+- Each process holds its own connection pool, sized automatically to fit its worker
+  concurrency (a client-only process gets 20). The sum across all API and worker
+  processes must stay below Postgres' `max_connections`; see
   [connection pooling](/reference/configuration/#connection-pooling).

@@ -39,8 +39,61 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
             await lockCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        await using var command = new NpgsqlCommand(PostgresSchema.Sql, connection, transaction);
-        await command.ExecuteNonQueryAsync(cancellationToken);
+        await using (
+            var bookkeepingCommand = new NpgsqlCommand(
+                PostgresSchema.MigrationsTableSql,
+                connection,
+                transaction
+            )
+        )
+        {
+            await bookkeepingCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        var applied = new HashSet<int>();
+        await using (
+            var appliedCommand = new NpgsqlCommand(
+                "select version from pw_schema_migrations;",
+                connection,
+                transaction
+            )
+        )
+        await using (var reader = await appliedCommand.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                applied.Add(reader.GetInt32(0));
+            }
+        }
+
+        foreach (var migration in PostgresSchema.Migrations)
+        {
+            if (applied.Contains(migration.Version))
+            {
+                continue;
+            }
+
+            await using (
+                var migrationCommand = new NpgsqlCommand(migration.Sql, connection, transaction)
+            )
+            {
+                await migrationCommand.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using var recordCommand = new NpgsqlCommand(
+                """
+                insert into pw_schema_migrations (version, name, applied_at)
+                values (@version, @name, @applied_at);
+                """,
+                connection,
+                transaction
+            );
+            recordCommand.Parameters.AddWithValue("version", migration.Version);
+            recordCommand.Parameters.AddWithValue("name", migration.Name);
+            recordCommand.Parameters.AddWithValue("applied_at", DateTimeOffset.UtcNow);
+            await recordCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         await transaction.CommitAsync(cancellationToken);
     }
 

@@ -25,9 +25,21 @@ public sealed class GreetingWorkflow
 }
 ```
 
-<!-- TODO: explain [Workflow("name")] (the durable identity of the workflow type),
-     [WorkflowRun], the (ctx, input, cancellationToken) signature, and supported
-     input/output types (JSON-serializable records work great). -->
+`[Workflow("greeting")]` sets the workflow's durable identity: the name stored with
+every run in Postgres. It defaults to the class name, but pin it explicitly for anything
+long-lived, because renaming a class without a pinned name orphans its in-flight runs.
+
+`[WorkflowRun]` marks the single public entry-point method. Its signature is
+`(IWorkflowContext, input, CancellationToken)`: exactly one context, exactly one input
+parameter, and an optional trailing cancellation token. The method can return `void`,
+`Task`, `ValueTask`, or their generic forms.
+
+Inputs and outputs are stored as JSON in Postgres, so any JSON-serializable type works.
+Records are a great fit:
+
+```csharp
+public sealed record SignupInput(string Company, string Email);
+```
 
 ## Defining activities
 
@@ -42,8 +54,12 @@ public sealed class EmailActivities
 }
 ```
 
-<!-- TODO: activity classes are resolved from DI; methods can be sync, Task, or
-     ValueTask; multiple parameters are supported. -->
+An activity class is a normal class resolved from your DI container, so constructor
+inject whatever the side effect needs, like an `HttpClient` or a `DbContext`. Methods
+can be sync, `Task`, or `ValueTask`, take multiple parameters, and accept an optional
+trailing `CancellationToken` that is cancelled if the activity loses its lease. Like
+workflows, `[Activity]` names default to the method name; pin them for anything
+long-lived.
 
 ## Calling activities from a workflow
 
@@ -54,10 +70,14 @@ var receipt = await ctx.Activity(
 );
 ```
 
-<!-- TODO: ctx.Activity awaits one activity; ctx.CallActivity creates a pending
-     WorkflowActivity for composition with ctx.WhenAll (see fan-in fan-out). Explain the
-     lambda-expression style: it's how PgWorkflows knows which activity to enqueue and
-     with which arguments. -->
+The lambda must be a direct method call on the activity class; that expression is how
+PgWorkflows knows which activity to enqueue and with which arguments. The arguments are
+evaluated and serialized at the call site, the activity runs on whichever worker leases
+the job, and the workflow parks until the result lands.
+
+`ctx.Activity` awaits one activity. To run several concurrently, create pending
+activities with `ctx.CallActivity` and await them together with `ctx.WhenAll`; see
+[fan-in fan-out](/fan-in-fan-out/).
 
 ## Registration
 
@@ -69,4 +89,6 @@ builder.Services.AddPgWorkflows(pg =>
 );
 ```
 
-<!-- TODO: AddWorkflow per workflow type, AddActivities per activity class. -->
+`AddWorkflow<T>()` registers one workflow class; `AddActivities<T>()` registers every
+`[Activity]` method on a class. Workflow and activity names must be unique across the
+registration, and duplicates fail at startup.

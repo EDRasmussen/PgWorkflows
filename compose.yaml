@@ -61,5 +61,17 @@ services:
       <<: *example-worker-env
       PGWORKFLOWS_WORKER_ID: worker-3
 
+  dashboard:
+    build:
+      context: dashboard
+    container_name: pgworkflows-dashboard
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/pgworkflows
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgworkflows-postgres-data:

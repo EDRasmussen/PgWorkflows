@@ -1,4 +1,4 @@
-import { db } from "$lib/server/db";
+import { getDb } from "$lib/server/db";
 import { sql } from "kysely";
 import type { PageServerLoad } from "./$types";
 
@@ -19,6 +19,7 @@ const parseCursor = (raw: string | null): Cursor | null => {
 };
 
 const loadRunDetail = async (runId: string) => {
+  const db = getDb();
   const run = await db
     .selectFrom("pw_workflow_runs")
     .selectAll()
@@ -59,6 +60,7 @@ const loadRunDetail = async (runId: string) => {
 };
 
 export const load: PageServerLoad = async ({ url }) => {
+  const db = getDb();
   const runId = url.searchParams.get("run");
 
   const statusParam = url.searchParams.get("status");
