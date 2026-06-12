@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using PgWorkflows.Persistence;
 using PgWorkflows.Workflows;
@@ -53,15 +54,14 @@ internal sealed class WorkflowWorker(
         );
 
         var errors = new ConcurrentBag<Exception>();
-        var heartbeat = new LeaseHeartbeat(
-            (leases, expiry, ct) => _store.RenewRunLeasesAsync(leases, expiry, ct),
-            _options.LeaseDuration,
-            _logger
-        );
-        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
-
-        try
+        await using (
+            var heartbeat = LeaseHeartbeat.Start(
+                (leases, expiry, ct) => _store.RenewRunLeasesAsync(leases, expiry, ct),
+                _options.LeaseDuration,
+                _logger,
+                cancellationToken
+            )
+        )
         {
             await Parallel.ForEachAsync(
                 leasedRuns,
@@ -87,11 +87,6 @@ internal sealed class WorkflowWorker(
                 }
             );
         }
-        finally
-        {
-            await heartbeatCts.CancelAsync();
-            await heartbeatLoop;
-        }
 
         if (!errors.IsEmpty)
         {
@@ -103,48 +98,39 @@ internal sealed class WorkflowWorker(
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        var heartbeat = new LeaseHeartbeat(
+        await using var heartbeat = LeaseHeartbeat.Start(
             (leases, expiry, ct) => _store.RenewRunLeasesAsync(leases, expiry, ct),
             _options.LeaseDuration,
-            _logger
+            _logger,
+            cancellationToken
         );
-        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
 
-        try
-        {
-            await ContinuousDispatcher.RunAsync(
-                new ContinuousDispatcher.Settings(
-                    "Workflow",
+        await ContinuousDispatcher.RunAsync(
+            new ContinuousDispatcher.Settings(
+                "Workflow",
+                _options.WorkerId,
+                _options.MaxConcurrency,
+                _options.BatchSize,
+                _options.PollInterval
+            ),
+            (count, ct) =>
+                _store.LeaseRunsAsync(
                     _options.WorkerId,
-                    _options.MaxConcurrency,
-                    _options.BatchSize,
-                    _options.PollInterval
+                    count,
+                    _options.LeaseDuration,
+                    DateTimeOffset.UtcNow,
+                    Math.Max(_options.MaxAttempts, 1),
+                    ct
                 ),
-                (count, ct) =>
-                    _store.LeaseRunsAsync(
-                        _options.WorkerId,
-                        count,
-                        _options.LeaseDuration,
-                        DateTimeOffset.UtcNow,
-                        Math.Max(_options.MaxAttempts, 1),
-                        ct
-                    ),
-                static run => run.WorkflowRunId,
-                async (run, ct) =>
-                {
-                    await ExecuteAsync(run, heartbeat, ct);
-                    return true;
-                },
-                _logger,
-                cancellationToken
-            );
-        }
-        finally
-        {
-            await heartbeatCts.CancelAsync();
-            await heartbeatLoop;
-        }
+            static run => run.WorkflowRunId,
+            async (run, ct) =>
+            {
+                await ExecuteAsync(run, heartbeat, ct);
+                return true;
+            },
+            _logger,
+            cancellationToken
+        );
     }
 
     private async Task ExecuteAsync(
@@ -184,18 +170,48 @@ internal sealed class WorkflowWorker(
             }
         );
 
+        using var activity = PgWorkflowsTelemetry.ActivitySource.StartActivity(
+            "pgworkflows.workflow.execute",
+            ActivityKind.Internal
+        );
+        activity?.SetTag("pgworkflows.worker.id", _options.WorkerId);
+        activity?.SetTag("pgworkflows.workflow.run_id", leasedRun.WorkflowRunId);
+        activity?.SetTag("pgworkflows.workflow.name", leasedRun.WorkflowName);
+        activity?.SetTag("pgworkflows.workflow.attempt", leasedRun.Attempt);
+        activity?.SetTag("pgworkflows.workflow.max_attempts", leasedRun.MaxAttempts);
+
         try
         {
-            await _runner.ExecuteLeasedAsync(
+            var outcome = await _runner.ExecuteLeasedAsync(
                 leasedRun.WorkflowRunId,
                 definition,
                 _serviceProvider,
                 leasedRun.LeaseToken,
                 runCts.Token
             );
+
+            activity?.SetTag("pgworkflows.workflow.outcome", OutcomeTag(outcome));
+            if (outcome == WorkflowExecutionOutcome.LeaseLost)
+            {
+                // The run executed but the outcome write lost the lease race: nothing was
+                // written and another worker owns the run now.
+                activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
+                _logger?.LogWarning(
+                    "Outcome for workflow run {WorkflowRunId} ({WorkflowName}) was not recorded because the lease was lost.",
+                    leasedRun.WorkflowRunId,
+                    leasedRun.WorkflowName
+                );
+            }
+            else
+            {
+                // Completed or durably parked (sleep, signal, or activity wait); either way this
+                // worker's pass over the run succeeded.
+                activity?.SetStatus(ActivityStatusCode.Ok);
+            }
         }
         catch (OperationCanceledException) when (leaseLost)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
             _logger?.LogWarning(
                 "Abandoning workflow run {WorkflowRunId} ({WorkflowName}) because its lease was lost.",
                 leasedRun.WorkflowRunId,
@@ -204,6 +220,7 @@ internal sealed class WorkflowWorker(
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, "shutdown");
             throw;
         }
         catch (Exception ex) when (TransientErrors.IsTransient(ex))
@@ -211,11 +228,14 @@ internal sealed class WorkflowWorker(
             // The database was unreachable or overloaded; the workflow itself did not fail.
             // Release the run (rolling back the attempt the lease charged) and rethrow so the
             // worker loop backs off instead of hammering an exhausted database.
+            activity?.SetStatus(ActivityStatusCode.Error, "transient infrastructure error");
             await ReleaseRunAfterTransientErrorAsync(leasedRun, ex);
             throw;
         }
         catch (Exception ex)
         {
+            activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+            activity?.AddException(ex);
             await RecordWorkflowFailureAsync(leasedRun, ex, runCts.Token);
         }
         finally
@@ -224,6 +244,17 @@ internal sealed class WorkflowWorker(
             runCts.Cancel();
         }
     }
+
+    private static string OutcomeTag(WorkflowExecutionOutcome outcome) =>
+        outcome switch
+        {
+            WorkflowExecutionOutcome.Completed => "completed",
+            WorkflowExecutionOutcome.Sleeping => "sleeping",
+            WorkflowExecutionOutcome.WaitingForSignal => "waiting_for_signal",
+            WorkflowExecutionOutcome.WaitingForActivities => "waiting_for_activities",
+            WorkflowExecutionOutcome.LeaseLost => "lease_lost",
+            _ => "unknown",
+        };
 
     private async Task ReleaseRunAfterTransientErrorAsync(LeasedWorkflowRun leasedRun, Exception ex)
     {

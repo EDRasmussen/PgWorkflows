@@ -20,13 +20,6 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
-    ValueTask<bool> RenewRunLeaseAsync(
-        Guid workflowRunId,
-        string leaseToken,
-        DateTimeOffset leaseExpiresAt,
-        CancellationToken cancellationToken = default
-    );
-
     /// <summary>
     /// Extends the lease on many runs in one statement. Returns the ids still held under their
     /// given lease token; any input id absent from the result has lost its lease and its worker

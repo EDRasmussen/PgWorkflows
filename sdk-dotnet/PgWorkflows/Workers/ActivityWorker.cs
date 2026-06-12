@@ -57,15 +57,14 @@ internal sealed class ActivityWorker(
         // retried after its lease expires.
         var writeErrors = new ConcurrentBag<Exception>();
 
-        var heartbeat = new LeaseHeartbeat(
-            (leases, expiry, ct) => _store.RenewLeasesAsync(leases, expiry, ct),
-            _options.LeaseDuration,
-            _logger
-        );
-        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
-
-        try
+        await using (
+            var heartbeat = LeaseHeartbeat.Start(
+                (leases, expiry, ct) => _store.RenewLeasesAsync(leases, expiry, ct),
+                _options.LeaseDuration,
+                _logger,
+                cancellationToken
+            )
+        )
         {
             await Parallel.ForEachAsync(
                 leasedJobs,
@@ -84,11 +83,6 @@ internal sealed class ActivityWorker(
                 }
             );
         }
-        finally
-        {
-            await heartbeatCts.CancelAsync();
-            await heartbeatLoop;
-        }
 
         if (!writeErrors.IsEmpty)
         {
@@ -103,43 +97,34 @@ internal sealed class ActivityWorker(
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
     {
-        var heartbeat = new LeaseHeartbeat(
+        await using var heartbeat = LeaseHeartbeat.Start(
             (leases, expiry, ct) => _store.RenewLeasesAsync(leases, expiry, ct),
             _options.LeaseDuration,
-            _logger
+            _logger,
+            cancellationToken
         );
-        using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeatLoop = heartbeat.RunAsync(heartbeatCts.Token);
 
-        try
-        {
-            await ContinuousDispatcher.RunAsync(
-                new ContinuousDispatcher.Settings(
-                    "Activity",
+        await ContinuousDispatcher.RunAsync(
+            new ContinuousDispatcher.Settings(
+                "Activity",
+                _options.WorkerId,
+                _options.MaxConcurrency,
+                _options.BatchSize,
+                _options.PollInterval
+            ),
+            (count, ct) =>
+                _store.LeaseAsync(
                     _options.WorkerId,
-                    _options.MaxConcurrency,
-                    _options.BatchSize,
-                    _options.PollInterval
+                    count,
+                    _options.LeaseDuration,
+                    DateTimeOffset.UtcNow,
+                    ct
                 ),
-                (count, ct) =>
-                    _store.LeaseAsync(
-                        _options.WorkerId,
-                        count,
-                        _options.LeaseDuration,
-                        DateTimeOffset.UtcNow,
-                        ct
-                    ),
-                static job => job.JobId,
-                async (job, ct) => await ExecuteAsync(job, heartbeat, ct) is null,
-                _logger,
-                cancellationToken
-            );
-        }
-        finally
-        {
-            await heartbeatCts.CancelAsync();
-            await heartbeatLoop;
-        }
+            static job => job.JobId,
+            async (job, ct) => await ExecuteAsync(job, heartbeat, ct) is null,
+            _logger,
+            cancellationToken
+        );
     }
 
     // Returns the exception if recording the outcome failed (a real store error), otherwise

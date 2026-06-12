@@ -1,9 +1,9 @@
 using System.Reflection;
-using System.Runtime.ExceptionServices;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using PgWorkflows.Activities;
+using PgWorkflows.Internal;
 using PgWorkflows.Persistence;
 using PgWorkflows.Persistence.Postgres;
 using PgWorkflows.Workers;
@@ -333,51 +333,11 @@ public sealed class PgWorkflowsBuilder
 
     private static DiscoveredActivity CreateDiscoveredActivity(MethodInfo method)
     {
-        ValidateActivityMethod(method);
+        ReflectionInvoke.ValidateInvokableMethod(method, "Activity method");
 
         var attribute = method.GetCustomAttribute<ActivityAttribute>()!;
         var name = string.IsNullOrWhiteSpace(attribute.Name) ? method.Name : attribute.Name!;
         return new DiscoveredActivity(name, method);
-    }
-
-    private static void ValidateActivityMethod(MethodInfo method)
-    {
-        var displayName = $"{method.DeclaringType?.FullName}.{method.Name}";
-
-        if (method.IsGenericMethodDefinition)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{displayName}' must not be generic."
-            );
-        }
-
-        var parameters = method.GetParameters();
-        if (parameters.Any(parameter => parameter.ParameterType.IsByRef))
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{displayName}' must not use ref, out, or in parameters."
-            );
-        }
-
-        var cancellationTokens = parameters
-            .Where(parameter => parameter.ParameterType == typeof(CancellationToken))
-            .ToArray();
-        if (cancellationTokens.Length > 1)
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{displayName}' must accept at most one CancellationToken."
-            );
-        }
-
-        if (
-            cancellationTokens.Length == 1
-            && parameters[^1].ParameterType != typeof(CancellationToken)
-        )
-        {
-            throw new InvalidOperationException(
-                $"Activity method '{displayName}' must put CancellationToken last."
-            );
-        }
     }
 
     private static ActivityHandler CreateHandler<TActivities>(
@@ -423,18 +383,8 @@ public sealed class PgWorkflowsBuilder
                 args[^1] = cancellationToken;
             }
 
-            object? returned;
-            try
-            {
-                returned = method.Invoke(activity, args);
-            }
-            catch (TargetInvocationException ex) when (ex.InnerException is not null)
-            {
-                ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-                throw;
-            }
-
-            var result = await AwaitResultAsync(returned, method.ReturnType);
+            var returned = ReflectionInvoke.InvokeUnwrapped(method, activity, args);
+            var result = await ReflectionInvoke.AwaitResultAsync(returned, method.ReturnType);
             return HasNoResult(method.ReturnType)
                 ? null
                 : JsonSerializer.Serialize(result, jsonSerializerOptions);
@@ -446,44 +396,6 @@ public sealed class PgWorkflowsBuilder
 
     private static object? GetDefault(Type type) =>
         type.IsValueType ? Activator.CreateInstance(type) : null;
-
-    private static async ValueTask<object?> AwaitResultAsync(object? returned, Type returnType)
-    {
-        if (returnType == typeof(void))
-        {
-            return null;
-        }
-
-        if (returnType == typeof(ValueTask))
-        {
-            await ((ValueTask)returned!).AsTask();
-            return null;
-        }
-
-        if (
-            returnType.IsGenericType
-            && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>)
-        )
-        {
-            var task = (Task)
-                returnType
-                    .GetMethod(nameof(ValueTask.AsTask), Type.EmptyTypes)!
-                    .Invoke(returned, null)!;
-            await task;
-            return task.GetType().GetProperty(nameof(Task<object>.Result))!.GetValue(task);
-        }
-
-        if (typeof(Task).IsAssignableFrom(returnType))
-        {
-            var task = (Task)returned!;
-            await task;
-            return returnType.IsGenericType
-                ? returnType.GetProperty(nameof(Task<object>.Result))!.GetValue(task)
-                : null;
-        }
-
-        return returned;
-    }
 
     private sealed record DiscoveredActivity(string Name, MethodInfo Method);
 

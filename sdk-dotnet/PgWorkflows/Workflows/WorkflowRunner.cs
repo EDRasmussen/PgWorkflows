@@ -110,7 +110,7 @@ internal sealed class WorkflowRunner(
         );
     }
 
-    internal async ValueTask ExecuteLeasedAsync(
+    internal async ValueTask<WorkflowExecutionOutcome> ExecuteLeasedAsync(
         Guid workflowRunId,
         WorkflowDefinition workflow,
         IServiceProvider serviceProvider,
@@ -167,46 +167,58 @@ internal sealed class WorkflowRunner(
                 _jsonSerializerOptions
             );
 
-            await _workflowStore.RecordRunSuccessAsync(
+            var recorded = await _workflowStore.RecordRunSuccessAsync(
                 workflowRunId,
                 resultJson,
                 leaseToken,
                 CancellationToken.None
             );
+            return recorded
+                ? WorkflowExecutionOutcome.Completed
+                : WorkflowExecutionOutcome.LeaseLost;
         }
         catch (WorkflowSleepException sleep)
         {
-            await _workflowStore.RecordRunSleepingAsync(
+            var parked = await _workflowStore.RecordRunSleepingAsync(
                 workflowRunId,
                 sleep.TimerSequence,
                 sleep.FireAt,
                 leaseToken,
                 CancellationToken.None
             );
+            return parked
+                ? WorkflowExecutionOutcome.Sleeping
+                : WorkflowExecutionOutcome.LeaseLost;
         }
         catch (WorkflowSignalWaitException signalWait)
         {
             // Unlike activity parks there is no grace deadline: a signal may take days to arrive,
             // so the run parks open-ended and signal delivery wakes it via the edge-trigger.
-            await _workflowStore.RecordRunWaitingForSignalAsync(
+            var parked = await _workflowStore.RecordRunWaitingForSignalAsync(
                 workflowRunId,
                 signalWait.WaitSequence,
                 signalWait.SignalName,
                 leaseToken,
                 CancellationToken.None
             );
+            return parked
+                ? WorkflowExecutionOutcome.WaitingForSignal
+                : WorkflowExecutionOutcome.LeaseLost;
         }
         catch (WorkflowParkException)
         {
             // The run is waiting on outstanding activity steps: release the lease and park until the
             // edge-trigger wakes it (or ParkGrace elapses as a backstop). Control flow, not failure.
             // Any other exception propagates to the workflow worker, which records the failure.
-            await _workflowStore.RecordRunWaitingAsync(
+            var parked = await _workflowStore.RecordRunWaitingAsync(
                 workflowRunId,
                 leaseToken,
                 ParkGrace,
                 CancellationToken.None
             );
+            return parked
+                ? WorkflowExecutionOutcome.WaitingForActivities
+                : WorkflowExecutionOutcome.LeaseLost;
         }
     }
 

@@ -25,18 +25,6 @@ internal interface IActivityJobStore
     ValueTask<ActivityJob?> GetAsync(Guid jobId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Extends the lease on a job currently held under <paramref name="leaseToken"/>.
-    /// Returns <c>false</c> when the lease is no longer held (expired and reclaimed, or
-    /// the job already completed), signalling the caller to abandon its work.
-    /// </summary>
-    ValueTask<bool> RenewLeaseAsync(
-        Guid jobId,
-        string leaseToken,
-        DateTimeOffset leaseExpiresAt,
-        CancellationToken cancellationToken = default
-    );
-
-    /// <summary>
     /// Extends the lease on many jobs in one statement. Returns the ids still held under their
     /// given lease token; any input id absent from the result has lost its lease (reclaimed or
     /// completed) and its worker should abandon it.

@@ -1,5 +1,6 @@
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
+using PgWorkflows.Internal;
 
 namespace PgWorkflows.Workflows;
 
@@ -110,41 +111,14 @@ public sealed class WorkflowRegistry
 
     private static void ValidateRunMethod(MethodInfo method)
     {
-        var displayName = $"{method.DeclaringType?.FullName}.{method.Name}";
-        if (method.IsGenericMethodDefinition)
-        {
-            throw new InvalidOperationException($"Workflow run method '{displayName}' must not be generic.");
-        }
+        ReflectionInvoke.ValidateInvokableMethod(method, "Workflow run method");
 
-        var parameters = method.GetParameters();
-        if (parameters.Any(parameter => parameter.ParameterType.IsByRef))
+        if (
+            method.GetParameters().Count(p => p.ParameterType == typeof(IWorkflowContext)) != 1
+        )
         {
             throw new InvalidOperationException(
-                $"Workflow run method '{displayName}' must not use ref, out, or in parameters."
-            );
-        }
-
-        if (parameters.Count(parameter => parameter.ParameterType == typeof(IWorkflowContext)) != 1)
-        {
-            throw new InvalidOperationException(
-                $"Workflow run method '{displayName}' must accept exactly one IWorkflowContext parameter."
-            );
-        }
-
-        var cancellationTokens = parameters
-            .Where(parameter => parameter.ParameterType == typeof(CancellationToken))
-            .ToArray();
-        if (cancellationTokens.Length > 1)
-        {
-            throw new InvalidOperationException(
-                $"Workflow run method '{displayName}' must accept at most one CancellationToken."
-            );
-        }
-
-        if (cancellationTokens.Length == 1 && parameters[^1].ParameterType != typeof(CancellationToken))
-        {
-            throw new InvalidOperationException(
-                $"Workflow run method '{displayName}' must put CancellationToken last."
+                $"Workflow run method '{method.DeclaringType?.FullName}.{method.Name}' must accept exactly one IWorkflowContext parameter."
             );
         }
 
@@ -195,11 +169,13 @@ public sealed class WorkflowRegistry
     private static Func<IServiceProvider, IWorkflowContext, object?, CancellationToken, ValueTask<object?>> CreateInvoker(
         Type workflowType,
         MethodInfo method
-    ) =>
-        async (provider, context, input, cancellationToken) =>
+    )
+    {
+        var parameters = method.GetParameters();
+
+        return async (provider, context, input, cancellationToken) =>
         {
             var workflow = ActivatorUtilities.GetServiceOrCreateInstance(provider, workflowType);
-            var parameters = method.GetParameters();
             var args = new object?[parameters.Length];
 
             for (var i = 0; i < parameters.Length; i++)
@@ -219,49 +195,8 @@ public sealed class WorkflowRegistry
                 }
             }
 
-            object? returned;
-            try
-            {
-                returned = method.Invoke(workflow, args);
-            }
-            catch (TargetInvocationException ex) when (ex.InnerException is not null)
-            {
-                throw ex.InnerException;
-            }
-
-            return await AwaitResultAsync(returned, method.ReturnType);
+            var returned = ReflectionInvoke.InvokeUnwrapped(method, workflow, args);
+            return await ReflectionInvoke.AwaitResultAsync(returned, method.ReturnType);
         };
-
-    private static async ValueTask<object?> AwaitResultAsync(object? returned, Type returnType)
-    {
-        if (returnType == typeof(void))
-        {
-            return null;
-        }
-
-        if (returnType == typeof(ValueTask))
-        {
-            await ((ValueTask)returned!).AsTask();
-            return null;
-        }
-
-        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>))
-        {
-            var task = (Task)returnType.GetMethod(nameof(ValueTask.AsTask), Type.EmptyTypes)!
-                .Invoke(returned, null)!;
-            await task;
-            return task.GetType().GetProperty(nameof(Task<object>.Result))!.GetValue(task);
-        }
-
-        if (typeof(Task).IsAssignableFrom(returnType))
-        {
-            var task = (Task)returned!;
-            await task;
-            return returnType.IsGenericType
-                ? returnType.GetProperty(nameof(Task<object>.Result))!.GetValue(task)
-                : null;
-        }
-
-        return returned;
     }
 }

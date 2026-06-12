@@ -261,20 +261,6 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         );
     }
 
-    public ValueTask<bool> RenewLeaseAsync(
-        Guid jobId,
-        string leaseToken,
-        DateTimeOffset leaseExpiresAt,
-        CancellationToken cancellationToken = default
-    ) =>
-        ExecuteLeaseGuardedUpdateAsync(
-            "lease_expires_at = @lease_expires_at",
-            parameters => parameters.AddWithValue("lease_expires_at", leaseExpiresAt),
-            jobId,
-            leaseToken,
-            cancellationToken
-        );
-
     public async ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
         IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
         DateTimeOffset leaseExpiresAt,
@@ -495,38 +481,6 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
 
         await transaction.CommitAsync(cancellationToken);
         return true;
-    }
-
-    /// <summary>
-    /// Runs an UPDATE guarded by the lease invariant — only the current lease holder, while
-    /// the job is still leased, may mutate it. Returns <c>false</c> when no row matched (the
-    /// lease was lost). The single source of truth for that guard; <paramref name="setClause"/>
-    /// is always a compile-time constant, never caller input.
-    /// </summary>
-    private async ValueTask<bool> ExecuteLeaseGuardedUpdateAsync(
-        string setClause,
-        Action<NpgsqlParameterCollection> bindSetParameters,
-        Guid jobId,
-        string leaseToken,
-        CancellationToken cancellationToken
-    )
-    {
-        var sql = $"""
-            update pw_activity_jobs
-            set {setClause}
-            where job_id = @job_id
-              and lease_token = @lease_token
-              and status = @leased_status;
-            """;
-
-        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(sql, connection);
-        bindSetParameters(command.Parameters);
-        command.Parameters.AddWithValue("job_id", jobId);
-        command.Parameters.AddWithValue("lease_token", leaseToken);
-        command.Parameters.AddWithValue("leased_status", LeasedStatus);
-
-        return await command.ExecuteNonQueryAsync(cancellationToken) > 0;
     }
 
     private static string? ReadNullableString(NpgsqlDataReader reader, int ordinal) =>

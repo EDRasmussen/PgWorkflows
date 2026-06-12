@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 
 namespace PgWorkflows.Workers;
 
-internal sealed class LeaseHeartbeat
+internal sealed class LeaseHeartbeat : IAsyncDisposable
 {
     private sealed class Entry(string leaseToken, Action onLeaseLost)
     {
@@ -22,8 +22,45 @@ internal sealed class LeaseHeartbeat
     private readonly TimeSpan _leaseDuration;
     private readonly TimeSpan _interval;
     private readonly ILogger? _logger;
+    private CancellationTokenSource? _loopCts;
+    private Task? _loop;
 
-    public LeaseHeartbeat(
+    /// <summary>
+    /// Creates a heartbeat and starts its renewal loop, linked to
+    /// <paramref name="cancellationToken"/>. Disposal cancels the loop and awaits its drain, so
+    /// callers hold the heartbeat in an <c>await using</c> for the duration of the leased work.
+    /// </summary>
+    public static LeaseHeartbeat Start(
+        Func<
+            IReadOnlyList<(Guid Id, string LeaseToken)>,
+            DateTimeOffset,
+            CancellationToken,
+            ValueTask<IReadOnlyList<Guid>>
+        > renew,
+        TimeSpan leaseDuration,
+        ILogger? logger,
+        CancellationToken cancellationToken
+    )
+    {
+        var heartbeat = new LeaseHeartbeat(renew, leaseDuration, logger);
+        heartbeat._loopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        heartbeat._loop = heartbeat.RunAsync(heartbeat._loopCts.Token);
+        return heartbeat;
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_loopCts is null || _loop is null)
+        {
+            return;
+        }
+
+        await _loopCts.CancelAsync();
+        await _loop;
+        _loopCts.Dispose();
+    }
+
+    private LeaseHeartbeat(
         Func<
             IReadOnlyList<(Guid Id, string LeaseToken)>,
             DateTimeOffset,
@@ -47,7 +84,7 @@ internal sealed class LeaseHeartbeat
 
     public void Unregister(Guid key) => _entries.TryRemove(key, out _);
 
-    public async Task RunAsync(CancellationToken cancellationToken)
+    private async Task RunAsync(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {

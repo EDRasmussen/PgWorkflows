@@ -715,7 +715,6 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             counting.MaxRenewBatch > 1,
             $"expected one batched renewal covering many leases; max batch was {counting.MaxRenewBatch}"
         );
-        Assert.Equal(0, counting.SingleRenewCalls);
     }
 
     private static void InterlockedMax(ref int target, int value)
@@ -792,9 +791,6 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
 
-        public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default) =>
-            inner.RenewLeaseAsync(id, token, exp, ct);
-
         public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
             inner.RenewLeasesAsync(leases, exp, ct);
 
@@ -860,9 +856,6 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
 
-        public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default) =>
-            inner.RenewLeaseAsync(id, token, exp, ct);
-
         public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
             inner.RenewLeasesAsync(leases, exp, ct);
 
@@ -884,11 +877,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     private sealed class RenewCountingStore(IActivityJobStore inner) : IActivityJobStore
     {
         private int _maxRenewBatch;
-        private int _singleRenewCalls;
 
         public int MaxRenewBatch => Volatile.Read(ref _maxRenewBatch);
-
-        public int SingleRenewCalls => Volatile.Read(ref _singleRenewCalls);
 
         public ValueTask<Guid> EnqueueAsync(
             string activityName,
@@ -905,12 +895,6 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
-
-        public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default)
-        {
-            Interlocked.Increment(ref _singleRenewCalls);
-            return inner.RenewLeaseAsync(id, token, exp, ct);
-        }
 
         public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default)
         {
