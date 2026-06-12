@@ -45,37 +45,6 @@ internal sealed class WorkflowRunner(
         );
     }
 
-    internal async ValueTask<TOutput> ExecuteAsync<TOutput>(
-        Guid workflowRunId,
-        WorkflowDefinition workflow,
-        IServiceProvider serviceProvider,
-        CancellationToken cancellationToken = default
-    ) =>
-        Deserialize<TOutput>(
-            await ExecuteCoreAsync(
-                workflowRunId,
-                workflow,
-                serviceProvider,
-                leaseToken: null,
-                cancellationToken
-            )
-        );
-
-    internal async ValueTask ExecuteLeasedAsync(
-        Guid workflowRunId,
-        WorkflowDefinition workflow,
-        IServiceProvider serviceProvider,
-        string leaseToken,
-        CancellationToken cancellationToken = default
-    ) =>
-        await ExecuteCoreAsync(
-            workflowRunId,
-            workflow,
-            serviceProvider,
-            leaseToken,
-            cancellationToken
-        );
-
     internal async ValueTask RunFailureHooksAsync(
         Guid workflowRunId,
         CancellationToken cancellationToken = default
@@ -141,37 +110,23 @@ internal sealed class WorkflowRunner(
         );
     }
 
-    private async ValueTask<string?> ExecuteCoreAsync(
+    internal async ValueTask ExecuteLeasedAsync(
         Guid workflowRunId,
         WorkflowDefinition workflow,
         IServiceProvider serviceProvider,
-        string? leaseToken,
-        CancellationToken cancellationToken
+        string leaseToken,
+        CancellationToken cancellationToken = default
     )
     {
         ArgumentNullException.ThrowIfNull(workflow);
         ArgumentNullException.ThrowIfNull(serviceProvider);
-
-        if (leaseToken is not null)
-        {
-            ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
 
         var run =
             await _workflowStore.GetRunAsync(workflowRunId, cancellationToken)
             ?? throw new InvalidOperationException(
                 $"Workflow run '{workflowRunId}' was not found."
             );
-
-        if (run.Status == WorkflowStatus.Succeeded)
-        {
-            return run.ResultJson;
-        }
-
-        if (leaseToken is null)
-        {
-            await _workflowStore.MarkRunRunningAsync(workflowRunId, cancellationToken);
-        }
 
         var input = run.InputJson is null
             ? null
@@ -181,7 +136,6 @@ internal sealed class WorkflowRunner(
             _workflowStore,
             _activityStore,
             _jsonSerializerOptions,
-            ActivityPollInterval,
             leaseToken
         );
 
@@ -213,25 +167,12 @@ internal sealed class WorkflowRunner(
                 _jsonSerializerOptions
             );
 
-            if (leaseToken is null)
-            {
-                await _workflowStore.RecordRunSuccessAsync(
-                    workflowRunId,
-                    resultJson,
-                    cancellationToken
-                );
-            }
-            else
-            {
-                await _workflowStore.RecordRunSuccessAsync(
-                    workflowRunId,
-                    resultJson,
-                    leaseToken,
-                    CancellationToken.None
-                );
-            }
-
-            return resultJson;
+            await _workflowStore.RecordRunSuccessAsync(
+                workflowRunId,
+                resultJson,
+                leaseToken,
+                CancellationToken.None
+            );
         }
         catch (WorkflowSleepException sleep)
         {
@@ -239,10 +180,9 @@ internal sealed class WorkflowRunner(
                 workflowRunId,
                 sleep.TimerSequence,
                 sleep.FireAt,
-                leaseToken!,
+                leaseToken,
                 CancellationToken.None
             );
-            return null;
         }
         catch (WorkflowSignalWaitException signalWait)
         {
@@ -252,40 +192,21 @@ internal sealed class WorkflowRunner(
                 workflowRunId,
                 signalWait.WaitSequence,
                 signalWait.SignalName,
-                leaseToken!,
+                leaseToken,
                 CancellationToken.None
             );
-            return null;
         }
         catch (WorkflowParkException)
         {
             // The run is waiting on outstanding activity steps: release the lease and park until the
             // edge-trigger wakes it (or ParkGrace elapses as a backstop). Control flow, not failure.
+            // Any other exception propagates to the workflow worker, which records the failure.
             await _workflowStore.RecordRunWaitingAsync(
                 workflowRunId,
-                leaseToken!,
+                leaseToken,
                 ParkGrace,
                 CancellationToken.None
             );
-            return null;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            if (leaseToken is null)
-            {
-                await _workflowStore.RecordRunFailureAsync(
-                    workflowRunId,
-                    ex.ToString(),
-                    CancellationToken.None
-                );
-                throw;
-            }
-
-            throw;
         }
     }
 

@@ -20,6 +20,7 @@ public static class PgWorkflowsServiceCollectionExtensions
         var workflowRegistry = new WorkflowRegistry();
         var builder = new PgWorkflowsBuilder(services, registry, workflowRegistry);
         configure?.Invoke(builder);
+        builder.FinalizeConnectionPool();
 
         services.AddSingleton(registry);
         services.AddSingleton(workflowRegistry);

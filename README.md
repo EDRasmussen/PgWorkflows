@@ -6,7 +6,7 @@ PgWorkflows lets you build long-running, scalable, durable workflows on top of t
 you already run. You don't need to host a separate workflow server or adopt a vendor ecosystem; a
 connection string is enough.
 
-📖 **Docs:** [pgworkflows.emildr.dk](https://pgworkflows.emildr.dk)
+**Docs:** [pgworkflows.emildr.dk](https://pgworkflows.emildr.dk)
 
 ## Features
 

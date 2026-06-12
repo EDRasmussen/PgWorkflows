@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Npgsql;
 using PgWorkflows.Activities;
 using PgWorkflows.Workers;
 using PgWorkflows.Workflows;
@@ -17,10 +18,26 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         registry.Register("wf-greet", (string input) => activities.Greet(input));
         registry.Register("wf-upper", (string input) => activities.Uppercase(input));
         var worker = new ActivityWorker(registry, Store, Options("activity-worker"));
-        var client = CreateClient<ClientGreetingWorkflow>();
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<ClientGreetingWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner);
+        var workflowWorker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
 
         using var workerCts = new CancellationTokenSource();
         var workerRun = worker.RunAsync(workerCts.Token);
+        var workflowWorkerRun = workflowWorker.RunAsync(workerCts.Token);
 
         try
         {
@@ -42,6 +59,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             workerCts.Cancel();
             await SwallowCancellation(workerRun);
+            await SwallowCancellation(workflowWorkerRun);
         }
     }
 
@@ -84,10 +102,26 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var registry = new ActivityRegistry();
         registry.Register("custom-greet", (string name) => activities.Greet(name));
         var worker = new ActivityWorker(registry, Store, Options("activity-worker"));
-        var client = CreateClient<CustomNamedWorkflow>();
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<CustomNamedWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner);
+        var workflowWorker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
 
         using var workerCts = new CancellationTokenSource();
         var workerRun = worker.RunAsync(workerCts.Token);
+        var workflowWorkerRun = workflowWorker.RunAsync(workerCts.Token);
 
         try
         {
@@ -100,110 +134,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             workerCts.Cancel();
             await SwallowCancellation(workerRun);
-        }
-    }
-
-    [Fact]
-    public async Task Workflow_resume_returns_completed_step_without_reexecuting_activity()
-    {
-        var activities = new TestActivities();
-        var registry = new ActivityRegistry();
-        registry.Register("wf-greet", (string input) => activities.Greet(input));
-        registry.Register("wf-upper", (string input) => activities.Uppercase(input));
-        var worker = new ActivityWorker(registry, Store, Options("activity-worker"));
-        var client = CreateClient<ResumableGreetingWorkflow>();
-        var handle = await client.StartAsync<ResumableGreetingWorkflow, string, string>("world");
-
-        using var workerCts = new CancellationTokenSource();
-        var workerRun = worker.RunAsync(workerCts.Token);
-
-        try
-        {
-            using var firstAttemptCts = new CancellationTokenSource();
-            ResumableGreetingWorkflow.Reset(firstAttemptCts);
-            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
-                await handle.GetResultAsync(firstAttemptCts.Token)
-            );
-
-            Assert.Equal(1, activities.GreetExecutions);
-            Assert.Equal(0, activities.UppercaseExecutions);
-
-            ResumableGreetingWorkflow.Reset(cancelAfterFirstStep: null);
-            var result = await handle.GetResultAsync();
-
-            Assert.Equal("HELLO WORLD", result);
-            Assert.Equal(1, activities.GreetExecutions);
-            Assert.Equal(1, activities.UppercaseExecutions);
-
-            var firstStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
-            var secondStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 1);
-            Assert.Equal(WorkflowStepStatus.Succeeded, firstStep!.Status);
-            Assert.Equal(WorkflowStepStatus.Succeeded, secondStep!.Status);
-
-            var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
-            Assert.Equal(WorkflowStatus.Succeeded, run!.Status);
-        }
-        finally
-        {
-            workerCts.Cancel();
-            await SwallowCancellation(workerRun);
-        }
-    }
-
-    [Fact]
-    public async Task Workflow_when_all_resumes_completed_fanout_without_reexecuting_activities()
-    {
-        var activities = new FanOutActivities();
-        var registry = new ActivityRegistry();
-        registry.Register<string, string>("wf-fanout-echo", activities.EchoAsync);
-        registry.Register("wf-fanout-join", (string input) => activities.Join(input));
-        var worker = new ActivityWorker(
-            registry,
-            Store,
-            Options("activity-worker") with
-            {
-                BatchSize = 2,
-                MaxConcurrency = 2,
-            }
-        );
-        var client = CreateClient<ResumableFanOutWorkflow>();
-        var handle = await client.StartAsync<ResumableFanOutWorkflow, FanOutInput, string>(
-            new FanOutInput("hello", "world")
-        );
-
-        using var workerCts = new CancellationTokenSource();
-        var workerRun = worker.RunAsync(workerCts.Token);
-
-        try
-        {
-            using var firstAttemptCts = new CancellationTokenSource();
-            ResumableFanOutWorkflow.Reset(firstAttemptCts);
-            await Assert.ThrowsAsync<OperationCanceledException>(async () =>
-                await handle.GetResultAsync(firstAttemptCts.Token)
-            );
-
-            Assert.Equal(2, activities.EchoExecutions);
-            Assert.Equal(0, activities.JoinExecutions);
-            Assert.Equal(2, activities.MaxConcurrentEchoes);
-
-            ResumableFanOutWorkflow.Reset(cancelAfterFanOut: null);
-            var result = await handle.GetResultAsync();
-
-            Assert.Equal("hello world", result);
-            Assert.Equal(2, activities.EchoExecutions);
-            Assert.Equal(1, activities.JoinExecutions);
-
-            var leftStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 0);
-            var rightStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 1);
-            var joinStep = await WorkflowStore.GetStepAsync(handle.WorkflowRunId, 2);
-            Assert.Equal(WorkflowStepStatus.Succeeded, leftStep!.Status);
-            Assert.Equal(WorkflowStepStatus.Succeeded, rightStep!.Status);
-            Assert.Equal(WorkflowStepStatus.Succeeded, joinStep!.Status);
-        }
-        finally
-        {
-            workerCts.Cancel();
-            await SwallowCancellation(workerRun);
+            await SwallowCancellation(workflowWorkerRun);
         }
     }
 
@@ -223,10 +154,26 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
                 MaxConcurrency = 2,
             }
         );
-        var client = CreateClient<MixedFailureFanOutWorkflow>();
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<MixedFailureFanOutWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+            ParkGrace = TimeSpan.FromSeconds(2),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner);
+        var workflowWorker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions()
+        );
 
         using var workerCts = new CancellationTokenSource();
         var workerRun = worker.RunAsync(workerCts.Token);
+        var workflowWorkerRun = workflowWorker.RunAsync(workerCts.Token);
 
         try
         {
@@ -250,6 +197,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             workerCts.Cancel();
             await SwallowCancellation(workerRun);
+            await SwallowCancellation(workflowWorkerRun);
         }
     }
 
@@ -386,6 +334,67 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     }
 
     [Fact]
+    public async Task Many_activity_waiting_workflows_wake_promptly_without_waiting_out_park_grace()
+    {
+        // Schedule->park lost-wake race: with many workflows each scheduling an activity that
+        // completes fast, a completion can land while its parent is still mid-park. A lost wake
+        // strands that run until ParkGrace, set here far above the assertion window so any lost
+        // wake trips the deadline instead of hiding behind a short backstop.
+        const int workflowCount = 50;
+        var services = new ServiceCollection();
+        services.AddSingleton(new TestActivities());
+        services.AddPgWorkflows(pg =>
+            pg.UsePostgres(DataSource, ensureSchemaOnStart: false)
+                .ConfigureActivityWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-activity-worker",
+                        MaxConcurrency = 16,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                    }
+                )
+                .ConfigureWorkflowWorker(options =>
+                    options with
+                    {
+                        WorkerId = "fleet-workflow-worker",
+                        MaxConcurrency = 16,
+                        PollInterval = TimeSpan.FromMilliseconds(10),
+                        ParkGrace = TimeSpan.FromSeconds(30),
+                    }
+                )
+                .AddActivities<TestActivities>()
+                .AddWorkflow<ClientGreetingWorkflow>()
+        );
+
+        await using var provider = services.BuildServiceProvider();
+        var hostedService = Assert.Single(provider.GetServices<IHostedService>());
+        await hostedService.StartAsync(CancellationToken.None);
+
+        try
+        {
+            var client = provider.GetRequiredService<IPgWorkflowClient>();
+            var runIds = new List<Guid>();
+            for (var i = 0; i < workflowCount; i++)
+            {
+                var handle = await client.StartAsync<ClientGreetingWorkflow, string, string>(
+                    $"user-{i}"
+                );
+                runIds.Add(handle.WorkflowRunId);
+            }
+
+            foreach (var runId in runIds)
+            {
+                var run = await WaitForWorkflowTerminalAsync(runId, TimeSpan.FromSeconds(15));
+                Assert.Equal(WorkflowStatus.Succeeded, run.Status);
+            }
+        }
+        finally
+        {
+            await hostedService.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Hosted_workflow_worker_treats_recorded_workflow_failure_as_processed()
     {
         var workflowRegistry = new WorkflowRegistry();
@@ -398,7 +407,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -418,6 +427,43 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     }
 
     [Fact]
+    public async Task Workflow_worker_releases_run_after_transient_infrastructure_error_without_consuming_an_attempt()
+    {
+        var workflowRegistry = new WorkflowRegistry();
+        workflowRegistry.Register<TransientInfrastructureFailureWorkflow>();
+        using var provider = new ServiceCollection().BuildServiceProvider();
+        var runner = new WorkflowRunner(WorkflowStore, Store)
+        {
+            ActivityPollInterval = TimeSpan.FromMilliseconds(10),
+        };
+        var client = new PgWorkflowClient(workflowRegistry, runner);
+        var worker = new WorkflowWorker(
+            workflowRegistry,
+            WorkflowStore,
+            runner,
+            provider,
+            WorkflowWorkerOptions() with { GetRetryDelay = _ => TimeSpan.Zero }
+        );
+        TransientInfrastructureFailureWorkflow.Reset();
+        var handle = await client.StartAsync<TransientInfrastructureFailureWorkflow, string, string>(
+            "world"
+        );
+
+        // The transient error is rethrown so the worker loop backs off, but the run itself is
+        // released back to pending rather than failed.
+        await Assert.ThrowsAsync<AggregateException>(async () => await worker.RunOnceAsync());
+
+        var released = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
+        Assert.Equal(WorkflowStatus.Pending, released!.Status);
+        Assert.Equal(0, released.Attempt);
+        Assert.Null(released.Error);
+
+        // MaxAttempts is 1; this retry only exists because the release rolled the attempt back.
+        Assert.Equal(1, await worker.RunOnceAsync());
+        Assert.Equal("hello world", await handle.GetResultAsync());
+    }
+
+    [Fact]
     public async Task Hosted_workflow_worker_retries_failed_workflow_without_reexecuting_completed_steps()
     {
         var activities = new RetryActivities();
@@ -434,7 +480,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var workflowWorker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -503,7 +549,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var workflowWorker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -539,8 +585,6 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // Release the activity: completing it wakes the parked run, which resumes to success.
             activities.Release.SetResult();
 
-            // Wait via the store (handle.GetResultAsync would re-execute inline in this caller and
-            // re-run the activity); read the durable result.
             var succeeded = await WaitForWorkflowTerminalAsync(
                 handle.WorkflowRunId,
                 TimeSpan.FromSeconds(10)
@@ -593,7 +637,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var workflowWorker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -671,7 +715,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -721,7 +765,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var workflowWorker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -773,7 +817,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -782,7 +826,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             WorkflowWorkerOptions() with { LeaseDuration = TimeSpan.FromMilliseconds(50) }
         );
         var handle = await client.StartAsync<ImmediateWorkflow, string, string>("world");
-        await WorkflowStore.MarkRunRunningAsync(handle.WorkflowRunId);
+        await MarkWorkflowRunRunningUnleasedAsync(handle.WorkflowRunId);
         await MarkWorkflowRunStaleAsync(handle.WorkflowRunId);
 
         var processed = await worker.RunOnceAsync();
@@ -811,7 +855,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -854,8 +898,6 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // worker then resumes, replays the cached pre-sleep step, and runs the rest.
             await FireWorkflowTimerAsync(handle.WorkflowRunId, 0);
 
-            // Wait via the store (not handle.GetResultAsync, which would re-execute inline in this
-            // caller and cannot Sleep); read the durable result.
             var succeeded = await WaitForWorkflowTerminalAsync(
                 handle.WorkflowRunId,
                 TimeSpan.FromSeconds(10)
@@ -892,7 +934,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -944,7 +986,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // production keeps the longer default. The edge-trigger handles the common case.
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -974,7 +1016,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -1005,7 +1047,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -1052,7 +1094,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
             ParkGrace = TimeSpan.FromSeconds(30),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -1094,7 +1136,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
             ParkGrace = TimeSpan.FromSeconds(2),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -1128,7 +1170,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             ActivityPollInterval = TimeSpan.FromMilliseconds(10),
         };
-        var client = new PgWorkflowClient(workflowRegistry, runner, provider);
+        var client = new PgWorkflowClient(workflowRegistry, runner);
         var worker = new WorkflowWorker(
             workflowRegistry,
             WorkflowStore,
@@ -1192,6 +1234,25 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         );
         command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
         return (long)(await command.ExecuteScalarAsync())!;
+    }
+
+    /// <summary>
+    /// Simulates a run stranded 'running' without a lease (e.g. a manual write or a crash from a
+    /// pre-lease version): the reclaim branch in LeaseRunsAsync must pick it up once stale.
+    /// </summary>
+    private async Task MarkWorkflowRunRunningUnleasedAsync(Guid workflowRunId)
+    {
+        await using var command = DataSource.CreateCommand(
+            """
+            update pw_workflow_runs
+            set status = 'running',
+                lease_token = null,
+                lease_expires_at = null
+            where workflow_run_id = @workflow_run_id;
+            """
+        );
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        await command.ExecuteNonQueryAsync();
     }
 
     private async Task MarkWorkflowRunStaleAsync(Guid workflowRunId)
@@ -1283,15 +1344,12 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     {
         var workflowRegistry = new WorkflowRegistry();
         workflowRegistry.Register<TWorkflow>();
-        var services = new ServiceCollection();
-        var provider = services.BuildServiceProvider();
         return new PgWorkflowClient(
             workflowRegistry,
             new WorkflowRunner(WorkflowStore, Store)
             {
                 ActivityPollInterval = TimeSpan.FromMilliseconds(10),
-            },
-            provider
+            }
         );
     }
 
@@ -1332,72 +1390,6 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             Interlocked.Increment(ref _uppercaseExecutions);
             return value.ToUpperInvariant();
-        }
-    }
-
-    private sealed class FanOutActivities
-    {
-        public int EchoExecutions => Volatile.Read(ref _echoExecutions);
-
-        public int JoinExecutions => Volatile.Read(ref _joinExecutions);
-
-        public int MaxConcurrentEchoes => Volatile.Read(ref _maxConcurrentEchoes);
-
-        private int _echoExecutions;
-        private int _joinExecutions;
-        private int _runningEchoes;
-        private int _maxConcurrentEchoes;
-        private readonly TaskCompletionSource _bothEchoesRunning = new(
-            TaskCreationOptions.RunContinuationsAsynchronously
-        );
-
-        [Activity("wf-fanout-echo")]
-        public async ValueTask<string> EchoAsync(string value, CancellationToken cancellationToken)
-        {
-            Interlocked.Increment(ref _echoExecutions);
-            var running = Interlocked.Increment(ref _runningEchoes);
-            UpdateMaxConcurrentEchoes(running);
-            if (running == 2)
-            {
-                _bothEchoesRunning.TrySetResult();
-            }
-
-            try
-            {
-                await _bothEchoesRunning.Task.WaitAsync(
-                    TimeSpan.FromSeconds(5),
-                    cancellationToken
-                );
-                return value;
-            }
-            finally
-            {
-                Interlocked.Decrement(ref _runningEchoes);
-            }
-        }
-
-        [Activity("wf-fanout-join")]
-        public string Join(string value)
-        {
-            Interlocked.Increment(ref _joinExecutions);
-            return value;
-        }
-
-        private void UpdateMaxConcurrentEchoes(int running)
-        {
-            while (true)
-            {
-                var current = Volatile.Read(ref _maxConcurrentEchoes);
-                if (running <= current)
-                {
-                    return;
-                }
-
-                if (Interlocked.CompareExchange(ref _maxConcurrentEchoes, running, current) == current)
-                {
-                    return;
-                }
-            }
         }
     }
 
@@ -1688,8 +1680,6 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         }
     }
 
-    public sealed record FanOutInput(string Left, string Right);
-
     public sealed record SignalDecision(string Value);
 
     [Workflow]
@@ -1739,73 +1729,6 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             );
             return await ctx.Activity(
                 (TestActivities a) => a.Uppercase(greeting),
-                cancellationToken
-            );
-        }
-    }
-
-    [Workflow]
-    public sealed class ResumableGreetingWorkflow
-    {
-        private static CancellationTokenSource? s_cancelAfterFirstStep;
-
-        public static void Reset(CancellationTokenSource? cancelAfterFirstStep) =>
-            s_cancelAfterFirstStep = cancelAfterFirstStep;
-
-        [WorkflowRun]
-        public async ValueTask<string> RunAsync(
-            IWorkflowContext ctx,
-            string name,
-            CancellationToken cancellationToken
-        )
-        {
-            var greeting = await ctx.Activity(
-                (TestActivities a) => a.Greet(name),
-                cancellationToken
-            );
-
-            if (s_cancelAfterFirstStep is not null)
-            {
-                await s_cancelAfterFirstStep.CancelAsync();
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-
-            return await ctx.Activity(
-                (TestActivities a) => a.Uppercase(greeting),
-                cancellationToken
-            );
-        }
-    }
-
-    [Workflow]
-    public sealed class ResumableFanOutWorkflow
-    {
-        private static CancellationTokenSource? s_cancelAfterFanOut;
-
-        public static void Reset(CancellationTokenSource? cancelAfterFanOut) =>
-            s_cancelAfterFanOut = cancelAfterFanOut;
-
-        [WorkflowRun]
-        public async ValueTask<string> RunAsync(
-            IWorkflowContext ctx,
-            FanOutInput input,
-            CancellationToken cancellationToken
-        )
-        {
-            var (left, right) = await ctx.WhenAll(
-                ctx.CallActivity((FanOutActivities a) => a.EchoAsync(input.Left, cancellationToken)),
-                ctx.CallActivity((FanOutActivities a) => a.EchoAsync(input.Right, cancellationToken)),
-                cancellationToken
-            );
-
-            if (s_cancelAfterFanOut is not null)
-            {
-                await s_cancelAfterFanOut.CancelAsync();
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-
-            return await ctx.Activity(
-                (FanOutActivities a) => a.Join($"{left} {right}"),
                 cancellationToken
             );
         }
@@ -1927,6 +1850,30 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         [WorkflowRun]
         public string Run(IWorkflowContext _, string name) =>
             throw new InvalidOperationException($"boom {name}");
+    }
+
+    [Workflow]
+    public sealed class TransientInfrastructureFailureWorkflow
+    {
+        private static int s_invocations;
+
+        public static void Reset() => Volatile.Write(ref s_invocations, 0);
+
+        [WorkflowRun]
+        public string Run(IWorkflowContext _, string name)
+        {
+            if (Interlocked.Increment(ref s_invocations) == 1)
+            {
+                throw new PostgresException(
+                    "sorry, too many clients already",
+                    "FATAL",
+                    "FATAL",
+                    "53300"
+                );
+            }
+
+            return $"hello {name}";
+        }
     }
 
     [Workflow]

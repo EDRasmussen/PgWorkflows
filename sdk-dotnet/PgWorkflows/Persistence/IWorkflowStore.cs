@@ -20,8 +20,6 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
-    ValueTask MarkRunRunningAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
-
     ValueTask<bool> RenewRunLeaseAsync(
         Guid workflowRunId,
         string leaseToken,
@@ -29,9 +27,29 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
-    ValueTask RecordRunSuccessAsync(
+    /// <summary>
+    /// Extends the lease on many runs in one statement. Returns the ids still held under their
+    /// given lease token; any input id absent from the result has lost its lease and its worker
+    /// should abandon it.
+    /// </summary>
+    ValueTask<IReadOnlyList<Guid>> RenewRunLeasesAsync(
+        IReadOnlyList<(Guid WorkflowRunId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    );
+
+    /// <summary>
+    /// Releases a leased run back to pending without recording a failure, rolling back the
+    /// attempt the lease charged. Used when execution was stopped by a transient infrastructure
+    /// error (connection exhaustion, network drop): the workflow did not fail, the worker just
+    /// could not reach the database, so the retry must not burn an attempt. The run becomes
+    /// visible again at <paramref name="visibleAt"/>. Returns false when the lease was lost; in
+    /// that case nothing is written.
+    /// </summary>
+    ValueTask<bool> ReleaseRunAsync(
         Guid workflowRunId,
-        string? resultJson,
+        string leaseToken,
+        DateTimeOffset visibleAt,
         CancellationToken cancellationToken = default
     );
 
@@ -87,12 +105,6 @@ internal interface IWorkflowStore
         int waitSequence,
         string signalName,
         string leaseToken,
-        CancellationToken cancellationToken = default
-    );
-
-    ValueTask RecordRunFailureAsync(
-        Guid workflowRunId,
-        string error,
         CancellationToken cancellationToken = default
     );
 

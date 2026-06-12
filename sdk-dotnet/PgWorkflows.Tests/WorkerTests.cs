@@ -464,6 +464,272 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         Assert.Equal(jobCount + 1, executions.Values.Sum());
     }
 
+    [Fact]
+    public async Task Worker_never_runs_more_than_max_concurrency_in_flight()
+    {
+        const int jobCount = 40;
+        const int maxConcurrency = 4;
+        var current = 0;
+        var observedMax = 0;
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>(
+            "track",
+            async (_, _, ct) =>
+            {
+                InterlockedMax(ref observedMax, Interlocked.Increment(ref current));
+                await Task.Delay(40, ct);
+                Interlocked.Decrement(ref current);
+                return "ok";
+            }
+        );
+
+        var ids = new List<Guid>();
+        for (var i = 0; i < jobCount; i++)
+        {
+            ids.Add(await Store.EnqueueTypedAsync("track", i.ToString(), maxAttempts: 3));
+        }
+
+        var worker = new ActivityWorker(
+            registry,
+            Store,
+            Options("cap") with
+            {
+                BatchSize = jobCount,
+                MaxConcurrency = maxConcurrency,
+                LeaseDuration = TimeSpan.FromSeconds(5),
+            }
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+        foreach (var id in ids)
+        {
+            await WaitForTerminalAsync(id, TimeSpan.FromSeconds(20));
+        }
+        cts.Cancel();
+        await SwallowCancellation(run);
+
+        Assert.True(
+            observedMax <= maxConcurrency,
+            $"observed {observedMax} concurrent executions, cap was {maxConcurrency}"
+        );
+        Assert.True(observedMax >= 2, $"expected real parallelism, observed only {observedMax}");
+    }
+
+    [Fact]
+    public async Task Worker_backs_off_when_lease_keeps_failing_rather_than_hot_looping()
+    {
+        var registry = new ActivityRegistry();
+        var faulty = new FaultyStore(Store, failLeaseCalls: int.MaxValue);
+        var worker = new ActivityWorker(
+            registry,
+            faulty,
+            Options("backoff") with { PollInterval = TimeSpan.FromMilliseconds(20) }
+        );
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
+        await SwallowCancellation(worker.RunAsync(cts.Token));
+
+        Assert.InRange(faulty.LeaseCalls, 1, 20);
+    }
+
+    [Fact]
+    public async Task Worker_recovers_after_transient_lease_failures()
+    {
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("recover", static input => input);
+        var id = await Store.EnqueueTypedAsync("recover", "ok", maxAttempts: 3);
+
+        var faulty = new FaultyStore(Store, failLeaseCalls: 3);
+        var worker = new ActivityWorker(
+            registry,
+            faulty,
+            Options("recover") with { PollInterval = TimeSpan.FromMilliseconds(50) }
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+        var job = await WaitForTerminalAsync(id, TimeSpan.FromSeconds(10));
+        cts.Cancel();
+        await SwallowCancellation(run);
+
+        Assert.Equal(JobStatus.Succeeded, job.Status);
+        Assert.True(faulty.LeaseCalls > 3);
+    }
+
+    [Fact]
+    public async Task Worker_backs_off_when_recording_outcomes_keeps_failing()
+    {
+        const int jobCount = 6;
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("rec", static input => input);
+        for (var i = 0; i < jobCount; i++)
+        {
+            await Store.EnqueueTypedAsync("rec", i.ToString(), maxAttempts: 100);
+        }
+
+        var faulty = new FaultyStore(Store, failRecordSuccess: true);
+        var worker = new ActivityWorker(
+            registry,
+            faulty,
+            Options("rec-backoff") with
+            {
+                BatchSize = jobCount,
+                MaxConcurrency = jobCount,
+                LeaseDuration = TimeSpan.FromMilliseconds(20),
+                PollInterval = TimeSpan.FromMilliseconds(5),
+            }
+        );
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
+        await SwallowCancellation(worker.RunAsync(cts.Token));
+
+        Assert.True(
+            faulty.RecordSuccessCalls is > 0 and < 150,
+            $"expected backoff to throttle re-execution, saw {faulty.RecordSuccessCalls} record attempts"
+        );
+    }
+
+    [Fact]
+    public async Task Worker_keeps_flowing_under_intermittent_failures_instead_of_stalling()
+    {
+        const int jobCount = 60;
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("flow", static input => input);
+        var ids = new List<Guid>();
+        for (var i = 0; i < jobCount; i++)
+        {
+            ids.Add(await Store.EnqueueTypedAsync("flow", i.ToString(), maxAttempts: 10));
+        }
+
+        var faulty = new FaultyStore(Store, failRecordEvery: 3);
+        var worker = new ActivityWorker(
+            registry,
+            faulty,
+            Options("flow") with
+            {
+                BatchSize = 8,
+                MaxConcurrency = 8,
+                LeaseDuration = TimeSpan.FromMilliseconds(300),
+                PollInterval = TimeSpan.FromMilliseconds(100),
+            }
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+
+        var jobs = new List<ActivityJob>();
+        foreach (var id in ids)
+        {
+            jobs.Add(await WaitForTerminalAsync(id, TimeSpan.FromSeconds(15)));
+        }
+
+        cts.Cancel();
+        await SwallowCancellation(run);
+
+        Assert.All(jobs, j => Assert.Equal(JobStatus.Succeeded, j.Status));
+    }
+
+    [Fact]
+    public async Task Worker_picks_up_work_promptly_after_a_lease_outage_clears()
+    {
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>("late", static input => input);
+
+        var faulty = new FaultyStore(Store, failLeaseCalls: 4);
+        var worker = new ActivityWorker(
+            registry,
+            faulty,
+            Options("post-outage") with { PollInterval = TimeSpan.FromMilliseconds(200) }
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+
+        await faulty.LeaseRecovered.WaitAsync(TimeSpan.FromSeconds(10));
+        var id = await Store.EnqueueTypedAsync("late", "ok", maxAttempts: 3);
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var job = await WaitForTerminalAsync(id, TimeSpan.FromSeconds(5));
+        started.Stop();
+
+        cts.Cancel();
+        await SwallowCancellation(run);
+
+        Assert.Equal(JobStatus.Succeeded, job.Status);
+        Assert.True(
+            started.Elapsed < TimeSpan.FromSeconds(1.5),
+            $"job waited {started.Elapsed.TotalSeconds:0.0}s after the outage cleared; backoff from lease failures leaked into the idle path"
+        );
+    }
+
+    [Fact]
+    public async Task Heartbeat_renews_all_in_flight_leases_in_one_batched_call()
+    {
+        const int jobCount = 6;
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var registry = new ActivityRegistry();
+        registry.Register<string, string>(
+            "slow",
+            async (_, _, ct) =>
+            {
+                await release.Task.WaitAsync(ct);
+                return "ok";
+            }
+        );
+
+        var ids = new List<Guid>();
+        for (var i = 0; i < jobCount; i++)
+        {
+            ids.Add(await Store.EnqueueTypedAsync("slow", i.ToString(), maxAttempts: 3));
+        }
+
+        var counting = new RenewCountingStore(Store);
+        var worker = new ActivityWorker(
+            registry,
+            counting,
+            Options("hb") with
+            {
+                BatchSize = jobCount,
+                MaxConcurrency = jobCount,
+                LeaseDuration = TimeSpan.FromMilliseconds(300),
+            }
+        );
+
+        using var cts = new CancellationTokenSource();
+        var run = worker.RunAsync(cts.Token);
+
+        // All six lease together and sit in the handler while several heartbeat ticks
+        // (LeaseDuration/3 = 100ms) fire, then release them.
+        await Task.Delay(500);
+        release.SetResult();
+
+        foreach (var id in ids)
+        {
+            await WaitForTerminalAsync(id, TimeSpan.FromSeconds(10));
+        }
+        cts.Cancel();
+        await SwallowCancellation(run);
+
+        Assert.True(
+            counting.MaxRenewBatch > 1,
+            $"expected one batched renewal covering many leases; max batch was {counting.MaxRenewBatch}"
+        );
+        Assert.Equal(0, counting.SingleRenewCalls);
+    }
+
+    private static void InterlockedMax(ref int target, int value)
+    {
+        int seen;
+        while (value > (seen = Volatile.Read(ref target)))
+        {
+            if (Interlocked.CompareExchange(ref target, value, seen) == seen)
+            {
+                return;
+            }
+        }
+    }
+
     private async Task<ActivityJob> WaitForTerminalAsync(Guid jobId, TimeSpan timeout)
     {
         using var deadline = new CancellationTokenSource(timeout);
@@ -529,6 +795,9 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default) =>
             inner.RenewLeaseAsync(id, token, exp, ct);
 
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
+            inner.RenewLeasesAsync(leases, exp, ct);
+
         public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default)
         {
             if (Interlocked.Increment(ref _successAttempts) == 1)
@@ -538,6 +807,119 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
             return inner.RecordSuccessAsync(id, token, resultJson, ct);
         }
+
+        public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
+            inner.RecordFailureAsync(id, token, error, retryable, next, ct);
+    }
+
+    private sealed class FaultyStore(
+        IActivityJobStore inner,
+        int failLeaseCalls = 0,
+        bool failRecordSuccess = false,
+        int failRecordEvery = 0
+    ) : IActivityJobStore
+    {
+        private int _leaseCalls;
+        private int _recordSuccessCalls;
+        private readonly TaskCompletionSource _leaseRecovered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public int LeaseCalls => Volatile.Read(ref _leaseCalls);
+
+        public int RecordSuccessCalls => Volatile.Read(ref _recordSuccessCalls);
+
+        public Task LeaseRecovered => _leaseRecovered.Task;
+
+        public ValueTask<Guid> EnqueueAsync(
+            string activityName,
+            string? inputJson,
+            int maxAttempts = 1,
+            DateTimeOffset? visibleAt = null,
+            string? idempotencyKey = null,
+            Guid? workflowRunId = null,
+            CancellationToken cancellationToken = default
+        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
+            string workerId,
+            int batchSize,
+            TimeSpan leaseDuration,
+            DateTimeOffset now,
+            CancellationToken cancellationToken = default
+        )
+        {
+            if (Interlocked.Increment(ref _leaseCalls) <= failLeaseCalls)
+            {
+                throw new InvalidOperationException("simulated lease outage");
+            }
+
+            _leaseRecovered.TrySetResult();
+            return inner.LeaseAsync(workerId, batchSize, leaseDuration, now, cancellationToken);
+        }
+
+        public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
+            inner.GetAsync(id, ct);
+
+        public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default) =>
+            inner.RenewLeaseAsync(id, token, exp, ct);
+
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
+            inner.RenewLeasesAsync(leases, exp, ct);
+
+        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default)
+        {
+            var call = Interlocked.Increment(ref _recordSuccessCalls);
+            if (failRecordSuccess || (failRecordEvery > 0 && call % failRecordEvery == 0))
+            {
+                throw new InvalidOperationException("simulated record outage");
+            }
+
+            return inner.RecordSuccessAsync(id, token, resultJson, ct);
+        }
+
+        public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
+            inner.RecordFailureAsync(id, token, error, retryable, next, ct);
+    }
+
+    private sealed class RenewCountingStore(IActivityJobStore inner) : IActivityJobStore
+    {
+        private int _maxRenewBatch;
+        private int _singleRenewCalls;
+
+        public int MaxRenewBatch => Volatile.Read(ref _maxRenewBatch);
+
+        public int SingleRenewCalls => Volatile.Read(ref _singleRenewCalls);
+
+        public ValueTask<Guid> EnqueueAsync(
+            string activityName,
+            string? inputJson,
+            int maxAttempts = 1,
+            DateTimeOffset? visibleAt = null,
+            string? idempotencyKey = null,
+            Guid? workflowRunId = null,
+            CancellationToken cancellationToken = default
+        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
+
+        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(string workerId, int batchSize, TimeSpan leaseDuration, DateTimeOffset now, CancellationToken ct = default) =>
+            inner.LeaseAsync(workerId, batchSize, leaseDuration, now, ct);
+
+        public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
+            inner.GetAsync(id, ct);
+
+        public ValueTask<bool> RenewLeaseAsync(Guid id, string token, DateTimeOffset exp, CancellationToken ct = default)
+        {
+            Interlocked.Increment(ref _singleRenewCalls);
+            return inner.RenewLeaseAsync(id, token, exp, ct);
+        }
+
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default)
+        {
+            InterlockedMax(ref _maxRenewBatch, leases.Count);
+            return inner.RenewLeasesAsync(leases, exp, ct);
+        }
+
+        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default) =>
+            inner.RecordSuccessAsync(id, token, resultJson, ct);
 
         public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
             inner.RecordFailureAsync(id, token, error, retryable, next, ct);

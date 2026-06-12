@@ -88,6 +88,17 @@ public static class PostgresSchema
             on pw_workflow_runs (visible_at, created_at)
             where status in ('pending', 'running');
 
+        -- Observability queries (e.g. the dashboard): newest-first feed with keyset pagination,
+        -- plus the same feed filtered by workflow name or status.
+        create index if not exists ix_pw_workflow_runs_created
+            on pw_workflow_runs (created_at desc, workflow_run_id desc);
+
+        create index if not exists ix_pw_workflow_runs_name_created
+            on pw_workflow_runs (workflow_name, created_at desc);
+
+        create index if not exists ix_pw_workflow_runs_status_created
+            on pw_workflow_runs (status, created_at desc);
+
         create table if not exists pw_workflow_steps (
             workflow_run_id uuid not null references pw_workflow_runs(workflow_run_id) on delete cascade,
             step_seq integer not null,

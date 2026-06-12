@@ -29,6 +29,4 @@ await ctx.Activity((EmailActivities a) => a.SendTrialEndingReminder(input.Email)
 <!-- TODO, from the API docs:
      - Parking is implemented via an internal control-flow exception, so don't wrap
        ctx.Sleep in a broad catch, or the park is swallowed (the run then fails loudly
-       rather than silently skipping the timer).
-     - Sleeping requires the hosted workflow worker (the AddPgWorkflows default); it
-       throws NotSupportedException on an inline client (executeWorkflowsInCaller: true). -->
+       rather than silently skipping the timer). -->

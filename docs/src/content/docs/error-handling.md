@@ -49,6 +49,17 @@ await ctx.Activity(
      state the execution order guarantee (reverse registration order?) and that
      registered compensations are themselves durable steps. -->
 
+## Infrastructure errors
+
+A transient database error (connection exhaustion, a dropped connection, a serialization
+failure) says nothing about your workflow. When one interrupts a run mid-execution, the
+worker does not record a failure. The run is released back to pending, the attempt the
+lease charged is rolled back, and the worker backs off before leasing more work. The run
+is retried after the normal retry delay with its attempt budget intact, so a workflow
+with `MaxAttempts = 1` still survives a database hiccup.
+
+Attempts are only consumed when the workflow itself throws.
+
 ## Workflow failure
 
 <!-- TODO: what the caller sees: GetResultAsync / ExecuteAsync throwing with the

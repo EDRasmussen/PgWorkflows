@@ -209,19 +209,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return runs;
     }
 
-    public ValueTask MarkRunRunningAsync(
-        Guid workflowRunId,
-        CancellationToken cancellationToken = default
-    ) =>
-        UpdateRunAsync(
-            workflowRunId,
-            RunningStatus,
-            resultJson: null,
-            error: null,
-            completedAt: null,
-            cancellationToken
-        );
-
     public async ValueTask<bool> RenewRunLeaseAsync(
         Guid workflowRunId,
         string leaseToken,
@@ -250,19 +237,72 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
     }
 
-    public ValueTask RecordRunSuccessAsync(
-        Guid workflowRunId,
-        string? resultJson,
+    public async ValueTask<IReadOnlyList<Guid>> RenewRunLeasesAsync(
+        IReadOnlyList<(Guid WorkflowRunId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
         CancellationToken cancellationToken = default
-    ) =>
-        UpdateRunAsync(
-            workflowRunId,
-            SucceededStatus,
-            resultJson,
-            error: null,
-            completedAt: DateTimeOffset.UtcNow,
-            cancellationToken
-        );
+    )
+    {
+        if (leases.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = new Guid[leases.Count];
+        var tokens = new string[leases.Count];
+        for (var i = 0; i < leases.Count; i++)
+        {
+            ids[i] = leases[i].WorkflowRunId;
+            tokens[i] = leases[i].LeaseToken;
+        }
+
+        const string sql = """
+            update pw_workflow_runs
+            set updated_at = @updated_at,
+                lease_expires_at = @lease_expires_at
+            where status = @running_status
+              and (workflow_run_id, lease_token) in (
+                  select * from unnest(@ids::uuid[], @tokens::text[]))
+            returning workflow_run_id;
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+        command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("ids", ids);
+        command.Parameters.AddWithValue("tokens", tokens);
+
+        var held = new List<Guid>(leases.Count);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            held.Add(reader.GetFieldValue<Guid>(0));
+        }
+
+        return held;
+    }
+
+    public async ValueTask<bool> ReleaseRunAsync(
+        Guid workflowRunId,
+        string leaseToken,
+        DateTimeOffset visibleAt,
+        CancellationToken cancellationToken = default
+    )
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseToken);
+
+        await using var command = _dataSource.CreateCommand(ReleaseRunSql);
+        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+        command.Parameters.AddWithValue("lease_token", leaseToken);
+        command.Parameters.AddWithValue("pending_status", PendingStatus);
+        command.Parameters.AddWithValue("running_status", RunningStatus);
+        command.Parameters.AddWithValue("visible_at", visibleAt);
+        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
+
+        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+    }
 
     public ValueTask<bool> RecordRunSuccessAsync(
         Guid workflowRunId,
@@ -279,24 +319,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
             completedAt: DateTimeOffset.UtcNow,
             cancellationToken
         );
-
-    public ValueTask RecordRunFailureAsync(
-        Guid workflowRunId,
-        string error,
-        CancellationToken cancellationToken = default
-    )
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(error);
-
-        return UpdateRunAsync(
-            workflowRunId,
-            FailedStatus,
-            resultJson: null,
-            error,
-            completedAt: DateTimeOffset.UtcNow,
-            cancellationToken
-        );
-    }
 
     public ValueTask<bool> RecordRunFailureAsync(
         Guid workflowRunId,
@@ -430,17 +452,56 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         var graceDeadline = now + (grace > TimeSpan.Zero ? grace : TimeSpan.Zero);
 
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(ActivityWaitParkSql, connection);
-        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
-        command.Parameters.AddWithValue("lease_token", leaseToken);
-        command.Parameters.AddWithValue("pending_status", PendingStatus);
-        command.Parameters.AddWithValue("running_status", RunningStatus);
-        command.Parameters.AddWithValue("now", now);
-        command.Parameters.AddWithValue("updated_at", now);
-        command.Parameters.AddWithValue("grace_deadline", graceDeadline);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        // One row updated => parked (or made runnable). Zero => lease lost; abandon, write nothing.
-        return await command.ExecuteNonQueryAsync(cancellationToken) == 1;
+        // The park UPDATE runs first so it acquires the run row lock before the recheck below,
+        // mirroring the signal park's lock ordering.
+        await using (var parkCommand = new NpgsqlCommand(ActivityWaitParkSql, connection, transaction))
+        {
+            parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            parkCommand.Parameters.AddWithValue("lease_token", leaseToken);
+            parkCommand.Parameters.AddWithValue("pending_status", PendingStatus);
+            parkCommand.Parameters.AddWithValue("running_status", RunningStatus);
+            parkCommand.Parameters.AddWithValue("updated_at", now);
+            parkCommand.Parameters.AddWithValue("grace_deadline", graceDeadline);
+
+            if (await parkCommand.ExecuteNonQueryAsync(cancellationToken) != 1)
+            {
+                // Lease lost: another worker now owns the run. Write nothing and abandon.
+                await transaction.RollbackAsync(cancellationToken);
+                return false;
+            }
+        }
+
+        // Close the schedule→park lost-wake race. An activity outcome committed while this park
+        // was in flight saw the run still 'running' and skipped its wake (the edge-trigger in
+        // RecordTerminalAndWakeAsync only updates parked runs). Because the park UPDATE above
+        // holds the run row lock, any such completion either committed before this statement's
+        // fresh snapshot (so the recheck sees the job as terminal and wakes the run) or is still
+        // blocked on the row lock and will see the parked run when it resumes. So one recheck
+        // here covers the window; without it the run would sit out the full grace deadline.
+        const string recheckSql = """
+            update pw_workflow_runs
+            set visible_at = @now,
+                updated_at = @now
+            where workflow_run_id = @workflow_run_id
+              and not exists (
+                  select 1
+                  from pw_activity_jobs job
+                  where job.workflow_run_id = @workflow_run_id
+                    and job.status in ('pending', 'leased'));
+            """;
+
+        await using (var recheckCommand = new NpgsqlCommand(recheckSql, connection, transaction))
+        {
+            recheckCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
+            recheckCommand.Parameters.AddWithValue("now", now);
+
+            await recheckCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return true;
     }
 
     public async ValueTask<bool> RecordRunWaitingForSignalAsync(
@@ -1126,41 +1187,6 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
         );
     }
 
-    private async ValueTask UpdateRunAsync(
-        Guid workflowRunId,
-        string status,
-        string? resultJson,
-        string? error,
-        DateTimeOffset? completedAt,
-        CancellationToken cancellationToken
-    )
-    {
-        const string sql = $"""
-            update pw_workflow_runs
-            set status = @status,
-                updated_at = @updated_at,
-                completed_at = @completed_at,
-                result = @result,
-                error = @error,
-                {LeaseReleaseColumns}
-            where workflow_run_id = @workflow_run_id;
-            """;
-
-        await using var command = _dataSource.CreateCommand(sql);
-        command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
-        command.Parameters.AddWithValue("status", status);
-        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow);
-        command.Parameters.AddWithValue("completed_at", (object?)completedAt ?? DBNull.Value);
-        command.Parameters.AddWithValue(
-            "result",
-            NpgsqlDbType.Jsonb,
-            (object?)resultJson ?? DBNull.Value
-        );
-        command.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
-
-        await command.ExecuteNonQueryAsync(cancellationToken);
-    }
-
     private async ValueTask<bool> UpdateLeasedRunAsync(
         Guid workflowRunId,
         string leaseToken,
@@ -1401,23 +1427,14 @@ public sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWorkfl
 
     private static readonly string SignalParkSql = BuildParkSql("@visible_at");
 
-    // Park with a future visible_at (the safety net) only while the run still has incomplete
-    // activity jobs; otherwise the jobs finished during the schedule→park window, so make the run
-    // immediately runnable (visible_at = now) rather than waiting out the grace. The edge-trigger
-    // in the activity store will pull visible_at forward to now when the last job completes.
-    private static readonly string ActivityWaitParkSql = BuildParkSql(
-        """
-        case
-            when exists (
-                select 1
-                from pw_activity_jobs job
-                where job.workflow_run_id = @workflow_run_id
-                  and job.status in ('pending', 'leased'))
-            then @grace_deadline
-            else @now
-        end
-        """
-    );
+    private static readonly string ReleaseRunSql = BuildParkSql("@visible_at");
+
+    // Park with the grace deadline (the safety net against a missed wake); the run is normally
+    // woken much sooner, either by the edge-trigger in the activity store when its last job
+    // completes, or by the recheck in RecordRunWaitingAsync when the jobs finished during the
+    // schedule→park window. The recheck runs on a fresh snapshot after this UPDATE holds the run
+    // row lock, so it cannot lose a concurrent completion the way an in-statement check would.
+    private static readonly string ActivityWaitParkSql = BuildParkSql("@grace_deadline");
 
     private const string PendingStatus = "pending";
     private const string RunningStatus = "running";

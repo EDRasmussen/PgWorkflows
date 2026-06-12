@@ -13,11 +13,35 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         _dataSource = dataSource ?? throw new ArgumentNullException(nameof(dataSource));
     }
 
+    /// <summary>
+    /// Stable advisory lock key serializing schema creation. Every process in the fleet runs
+    /// <see cref="EnsureSchemaAsync"/> at startup; concurrent "if not exists" DDL takes
+    /// conflicting table locks in varying orders and deadlocks Postgres, crashing workers that
+    /// start simultaneously. With the lock, one process applies the script and the rest wait,
+    /// then re-run it as a no-op.
+    /// </summary>
+    private const long SchemaAdvisoryLockKey = 0x7067_776f_726b_666c; // "pgworkfl"
+
     public async ValueTask EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        await using var command = new NpgsqlCommand(PostgresSchema.Sql, connection);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (
+            var lockCommand = new NpgsqlCommand(
+                "select pg_advisory_xact_lock(@key);",
+                connection,
+                transaction
+            )
+        )
+        {
+            lockCommand.Parameters.AddWithValue("key", SchemaAdvisoryLockKey);
+            await lockCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await using var command = new NpgsqlCommand(PostgresSchema.Sql, connection, transaction);
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
     }
 
     public async ValueTask<Guid> EnqueueAsync(
@@ -251,6 +275,51 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             cancellationToken
         );
 
+    public async ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
+        IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
+        DateTimeOffset leaseExpiresAt,
+        CancellationToken cancellationToken = default
+    )
+    {
+        if (leases.Count == 0)
+        {
+            return [];
+        }
+
+        var ids = new Guid[leases.Count];
+        var tokens = new string[leases.Count];
+        for (var i = 0; i < leases.Count; i++)
+        {
+            ids[i] = leases[i].JobId;
+            tokens[i] = leases[i].LeaseToken;
+        }
+
+        const string sql = """
+            update pw_activity_jobs
+            set lease_expires_at = @lease_expires_at
+            where status = @leased_status
+              and (job_id, lease_token) in (
+                  select * from unnest(@ids::uuid[], @tokens::text[]))
+            returning job_id;
+            """;
+
+        await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
+        await using var command = new NpgsqlCommand(sql, connection);
+        command.Parameters.AddWithValue("lease_expires_at", leaseExpiresAt);
+        command.Parameters.AddWithValue("leased_status", LeasedStatus);
+        command.Parameters.AddWithValue("ids", ids);
+        command.Parameters.AddWithValue("tokens", tokens);
+
+        var held = new List<Guid>(leases.Count);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            held.Add(reader.GetFieldValue<Guid>(0));
+        }
+
+        return held;
+    }
+
     public ValueTask<bool> RecordSuccessAsync(
         Guid jobId,
         string leaseToken,
@@ -347,6 +416,36 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
+        // Lock the parent run row before touching the job. The park (RecordRunWaitingAsync) also
+        // locks the run row first, so completion and park serialize run-then-job in one direction.
+        // Without it the wake below can no-op against a still-'running' run while the park's recheck
+        // reads a snapshot that misses this job's uncommitted completion — a lost wake that strands
+        // the run until its full grace deadline. (workflow_run_id is immutable once set.)
+        Guid? workflowRunId;
+        await using (
+            var command = new NpgsqlCommand(
+                "select workflow_run_id from pw_activity_jobs where job_id = @job_id;",
+                connection,
+                transaction
+            )
+        )
+        {
+            command.Parameters.AddWithValue("job_id", jobId);
+            workflowRunId =
+                await command.ExecuteScalarAsync(cancellationToken) is Guid id ? id : null;
+        }
+
+        if (workflowRunId is { } lockRunId)
+        {
+            await using var command = new NpgsqlCommand(
+                "select 1 from pw_workflow_runs where workflow_run_id = @workflow_run_id for update;",
+                connection,
+                transaction
+            );
+            command.Parameters.AddWithValue("workflow_run_id", lockRunId);
+            await command.ExecuteScalarAsync(cancellationToken);
+        }
+
         var terminalSql = $"""
             update pw_activity_jobs
             set {setClause}
@@ -370,23 +469,24 @@ public sealed class PostgresActivityJobStore : IActivityJobStore
             }
         }
 
-        // Wake the parent run (if this job belonged to one) by pulling its parked deadline forward.
-        // The visible_at > @now guard only ever pulls the wake earlier, never pushes a deadline out,
-        // and makes this idempotent across concurrent sibling completions. A null/absent run id or a
-        // run that is not currently parked (running, or already runnable) makes this a no-op.
-        const string wakeSql = """
-            update pw_workflow_runs
-            set visible_at = @now,
-                updated_at = @now
-            where workflow_run_id = (select workflow_run_id from pw_activity_jobs where job_id = @job_id)
-              and status = @pending_status
-              and lease_token is null
-              and visible_at > @now;
-            """;
-
-        await using (var command = new NpgsqlCommand(wakeSql, connection, transaction))
+        // Wake the parent run by pulling its parked deadline forward. The visible_at > @now guard
+        // only ever pulls the wake earlier, never pushes a deadline out, and makes this idempotent
+        // across concurrent sibling completions. A run not currently parked (running, or already
+        // runnable) makes this a no-op.
+        if (workflowRunId is { } wakeRunId)
         {
-            command.Parameters.AddWithValue("job_id", jobId);
+            const string wakeSql = """
+                update pw_workflow_runs
+                set visible_at = @now,
+                    updated_at = @now
+                where workflow_run_id = @workflow_run_id
+                  and status = @pending_status
+                  and lease_token is null
+                  and visible_at > @now;
+                """;
+
+            await using var command = new NpgsqlCommand(wakeSql, connection, transaction);
+            command.Parameters.AddWithValue("workflow_run_id", wakeRunId);
             command.Parameters.AddWithValue("now", now);
             command.Parameters.AddWithValue("pending_status", PendingStatus);
 

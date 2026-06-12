@@ -16,12 +16,6 @@ public interface IWorkflowContext
     /// Parking is implemented by throwing an internal control-flow exception, so do not wrap
     /// <c>Sleep</c> in a broad <c>catch</c> — doing so swallows the park. If that happens the run
     /// fails loudly rather than silently skipping the timer.
-    /// <para>
-    /// Sleeping requires the hosted workflow worker (which <c>AddPgWorkflows</c> configures by
-    /// default). It must not be driven by an inline client (a <c>PgWorkflowClient</c> with
-    /// <c>executeWorkflowsInCaller: true</c>); calling <c>Sleep</c> on such a run throws
-    /// <see cref="NotSupportedException"/>.
-    /// </para>
     /// </remarks>
     ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default);
 
@@ -31,9 +25,8 @@ public interface IWorkflowContext
     /// signals with the same name are consumed in delivery order.
     /// </summary>
     /// <remarks>
-    /// Like <see cref="Sleep"/>, waiting for a signal requires the hosted workflow worker. It parks
-    /// the run by throwing an internal control-flow exception; do not wrap it in a broad
-    /// <c>catch</c> that swallows the park.
+    /// Like <see cref="Sleep"/>, waiting parks the run by throwing an internal control-flow
+    /// exception; do not wrap it in a broad <c>catch</c> that swallows the park.
     /// </remarks>
     ValueTask<TSignal> WaitForSignal<TSignal>(
         string name,
