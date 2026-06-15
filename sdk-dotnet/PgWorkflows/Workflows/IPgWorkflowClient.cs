@@ -3,7 +3,7 @@ namespace PgWorkflows.Workflows;
 /// <summary>
 /// The application-facing entry point for workflow runs: start a run and await its result, or
 /// fire-and-track with a <see cref="WorkflowHandle{TOutput}"/>. Resolved from DI after
-/// <c>AddPgWorkflows</c>; in a <c>DisableWorkers()</c> process the client only enqueues — a
+/// <c>AddPgWorkflows</c>; in a <c>DisableWorkers()</c> process the client only enqueues, and a
 /// worker process pointed at the same database executes the run.
 /// </summary>
 public interface IPgWorkflowClient

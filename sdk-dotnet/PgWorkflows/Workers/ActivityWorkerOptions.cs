@@ -11,7 +11,7 @@ public sealed record ActivityWorkerOptions
 
     /// <summary>
     /// Jobs leased per database round-trip, capped at <see cref="MaxConcurrency"/>. The worker
-    /// dispatches continuously — it refills a freed slot as soon as a job finishes — so this is a
+    /// dispatches continuously (it refills a freed slot as soon as a job finishes), so this is a
     /// round-trip amortization knob, not a concurrency limit. Leave it and tune
     /// <see cref="MaxConcurrency"/>; lower it only to grab smaller chunks per lease.
     /// </summary>

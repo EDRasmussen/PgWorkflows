@@ -20,9 +20,9 @@ internal sealed class WorkflowContext(
     private readonly JsonSerializerOptions? _jsonSerializerOptions = jsonSerializerOptions;
 
     /// <summary>
-    /// The run's lease token under the executing workflow worker. Parking (suspending) the run —
-    /// for <c>ctx.Sleep</c>, <c>ctx.WaitForSignal</c>, and while waiting on activity steps —
-    /// releases this lease, guarded by the token so a lost lease writes nothing.
+    /// The run's lease token under the executing workflow worker. Parking the run (for
+    /// <c>ctx.Sleep</c>, <c>ctx.WaitForSignal</c>, and while waiting on activity steps) releases
+    /// this lease, guarded by the token so a lost lease writes nothing.
     /// </summary>
     private readonly string _leaseToken =
         leaseToken ?? throw new ArgumentNullException(nameof(leaseToken));
@@ -306,7 +306,7 @@ internal sealed class WorkflowContext(
 
     /// <summary>
     /// Ensures a step's activity job is enqueued and step row recorded (idempotent on replay).
-    /// Never parks or throws on failure — that is the resolve phase's job.
+    /// Never parks or throws on failure; that is the resolve phase's job.
     /// </summary>
     private async ValueTask<StepHandle> EnsureStepScheduledAsync(
         int stepSequence,
@@ -346,8 +346,8 @@ internal sealed class WorkflowContext(
     }
 
     /// <summary>
-    /// Reads a step's current outcome from its memoized step row, else its activity job — purely
-    /// observational. Returns the outcome rather than acting on it so a fan-out can wait for all
+    /// Reads a step's current outcome from its memoized step row, else its activity job; this is
+    /// purely observational. Returns the outcome rather than acting on it so a fan-out can wait for all
     /// siblings before committing, matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/>.
     /// </summary>
     private async ValueTask<StepResolution<TOutput>> ResolveStepAsync<TOutput>(

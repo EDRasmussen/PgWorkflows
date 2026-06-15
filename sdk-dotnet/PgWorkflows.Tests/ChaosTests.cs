@@ -8,8 +8,8 @@ namespace PgWorkflows.Tests;
 /// <summary>
 /// The integration of the mechanisms the deterministic tests isolate (SKIP LOCKED,
 /// lease reclaim, heartbeat), exercised under sustained worker crash/restart churn.
-/// Its single job: prove the queue still <b>drains every job</b> — nothing lost, nothing
-/// stuck in <c>leased</c> — when workers keep dying mid-flight. Exactly-once completion
+/// Its single job: prove the queue still <b>drains every job</b> (nothing lost, nothing
+/// stuck in <c>leased</c>) when workers keep dying mid-flight. Exactly-once completion
 /// of an individual job is covered deterministically by <see cref="WorkerTests"/>.
 /// </summary>
 public sealed class ChaosTests(PostgresFixture fixture) : PostgresTestBase(fixture)

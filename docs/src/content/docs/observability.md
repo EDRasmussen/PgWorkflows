@@ -37,8 +37,8 @@ a series of short passes, each ending in a park, rather than one span that lasts
 
 ## The dashboard
 
-A read-only web UI over the PgWorkflows tables — a live run feed plus a per-run view of
-steps, timers, signal waits, and failure hooks — shipped as a Docker image. See
+A read-only web UI over the PgWorkflows tables (a live run feed plus a per-run view of
+steps, timers, signal waits, and failure hooks), shipped as a Docker image. See
 [Dashboard](/dashboard/) to run it.
 
 ## Plain SQL

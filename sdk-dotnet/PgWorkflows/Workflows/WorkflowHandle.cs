@@ -2,7 +2,7 @@ namespace PgWorkflows.Workflows;
 
 /// <summary>
 /// A reference to a started workflow run: carries its id, awaits its durable result, and
-/// delivers signals to it. Handles are cheap and stateless — the run itself lives in Postgres,
+/// delivers signals to it. Handles are cheap and stateless; the run itself lives in Postgres,
 /// so a handle can be discarded and the run looked up later by id from any process.
 /// </summary>
 public sealed class WorkflowHandle<TOutput>

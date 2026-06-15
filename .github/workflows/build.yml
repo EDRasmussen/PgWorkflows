@@ -1,7 +1,7 @@
 name: Release to NuGet
 
 # To publish: git tag v0.1.0 && git push origin v0.1.0 (tag must match <Version> in the csproj).
-# Publishes via nuget.org Trusted Publishing (OIDC) — no long-lived API key secret. The trusted
+# Publishes via nuget.org Trusted Publishing (OIDC), so no long-lived API key secret is needed. The trusted
 # publishing policy on nuget.org must point at this workflow file (build.yml) and this repo.
 
 on:

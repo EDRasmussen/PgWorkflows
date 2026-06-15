@@ -53,7 +53,7 @@ applied_at)` in the same transaction.
 
 A worker holds one connection per in-flight item, so the pool size and the worker
 concurrency are really the same number. You set the concurrency you want;
-`UsePostgres` **sizes the pool to fit it** — `ActivityWorker.MaxConcurrency +
+`UsePostgres` **sizes the pool to fit it**: `ActivityWorker.MaxConcurrency +
 WorkflowWorker.MaxConcurrency` plus a little headroom (a client-only process gets 20).
 There is no second knob to reconcile. A single shared heartbeat renews all of a worker's
 leases in one query, so renewal does not add a connection per in-flight item.
@@ -86,7 +86,7 @@ migrations, dashboards, and ad-hoc connections.
 | ------ | ------- | ----------- |
 | `WorkerId` | machine name | Identifies this worker in leases. |
 | `BatchSize` | `16` | Runs leased per database round-trip, capped at `MaxConcurrency`. A round-trip amortization knob, not a concurrency limit; the worker refills slots continuously. |
-| `MaxConcurrency` | `10` | Max runs in flight at once. The worker keeps this many running, leasing a replacement the moment one finishes. The connection pool sizes itself to this (plus the activity worker's share) — see [connection pooling](#connection-pooling). |
+| `MaxConcurrency` | `10` | Max runs in flight at once. The worker keeps this many running, leasing a replacement the moment one finishes. The connection pool sizes itself to this (plus the activity worker's share); see [connection pooling](#connection-pooling). |
 | `LeaseDuration` | 30 s | How long a lease lives between heartbeats. |
 | `PollInterval` | 250 ms | How often an idle worker polls for work. |
 | `ParkGrace` | 30 s | Safety-net deadline for runs parked on activity steps; they're normally woken sooner by the edge-trigger. |
@@ -99,7 +99,7 @@ migrations, dashboards, and ad-hoc connections.
 | ------ | ------- | ----------- |
 | `WorkerId` | machine name | Identifies this worker in leases. |
 | `BatchSize` | `16` | Jobs leased per database round-trip, capped at `MaxConcurrency`. A round-trip amortization knob, not a concurrency limit; the worker refills slots continuously. |
-| `MaxConcurrency` | `10` | Max activities in flight at once, refilled the moment one finishes. The connection pool sizes itself to this (plus the workflow worker's share) — see [connection pooling](#connection-pooling). |
+| `MaxConcurrency` | `10` | Max activities in flight at once, refilled the moment one finishes. The connection pool sizes itself to this (plus the workflow worker's share); see [connection pooling](#connection-pooling). |
 | `LeaseDuration` | 30 s | How long a lease lives between heartbeats. |
 | `PollInterval` | 250 ms | How often an idle worker polls for work. |
 | `GetRetryDelay` | `min(attempt × 5 s, 60 s)` | Backoff between activity retry attempts. |

@@ -63,7 +63,7 @@ public sealed class BuilderTests
             workflowConcurrency: 15
         );
 
-        // 15 + 15 + ConnectionHeadroom — the pool follows concurrency with no explicit setting.
+        // 15 + 15 + ConnectionHeadroom; the pool follows concurrency with no explicit setting.
         Assert.Equal(
             30 + PgWorkflowsBuilder.ConnectionHeadroom,
             new NpgsqlConnectionStringBuilder(connectionString).MaxPoolSize

@@ -526,7 +526,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             Assert.Equal(WorkflowStatus.Succeeded, succeededRun.Status);
             // A real retry happened (attempt 2 of 2): the transient first failure spent an attempt,
             // while the activity park did not (it gives its attempt back). The activity body ran
-            // exactly once across the retry — its completed step was memoized, not re-executed.
+            // exactly once across the retry; its completed step was memoized, not re-executed.
             Assert.Equal(2, succeededRun.Attempt);
             Assert.Equal(2, succeededRun.MaxAttempts);
             Assert.Equal(1, activities.EchoExecutions);
@@ -580,7 +580,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // Wait until the activity is actually executing (it then blocks on the gate).
             await activities.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-            // While the activity runs, the run must be parked with no lease held — that is the
+            // While the activity runs, the run must be parked with no lease held; that is the
             // feature. (The activity is gated, so it cannot complete and race this observation.)
             var parked = await WaitForWorkflowStatusAsync(
                 handle.WorkflowRunId,
@@ -623,7 +623,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
     public async Task Leased_when_all_releases_its_lease_while_fanned_out_activities_run_then_resumes()
     {
         // The headline of the feature: a fan-out (ctx.WhenAll) under the workflow worker dispatches
-        // every sibling to the queue, then releases its lease while they run — holding no worker —
+        // every sibling to the queue, then releases its lease while they run (holding no worker)
         // and resumes exactly once when the last sibling completes, with each body run a single time.
         var activities = new GatedFanOutActivities();
         var registry = new ActivityRegistry();
@@ -669,7 +669,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             await activities.LeftStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
             await activities.RightStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
 
-            // While the fan-out runs, the run is parked with no lease held — it yielded its worker.
+            // While the fan-out runs, the run is parked with no lease held; it yielded its worker.
             var parked = await WaitForWorkflowStatusAsync(
                 handle.WorkflowRunId,
                 WorkflowStatus.Pending,
@@ -892,7 +892,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
         try
         {
-            // Drive the continuous workers until the run is durably parked on ctx.Sleep — i.e. its
+            // Drive the continuous workers until the run is durably parked on ctx.Sleep, i.e. its
             // timer row exists. Note the pre-sleep activity now also parks-and-resumes (every activity
             // wait parks), so we wait for the durable sleep state rather than counting worker passes.
             // The sleep is long (30s) so the checks below cannot race a real timer firing.

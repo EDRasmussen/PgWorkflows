@@ -164,7 +164,7 @@ internal sealed class LeaseHeartbeat : IAsyncDisposable
             return;
         }
 
-        // A throwing callback must not take down the loop — that would stop renewing every other
+        // A throwing callback must not take down the loop; that would stop renewing every other
         // lease this worker holds.
         try
         {

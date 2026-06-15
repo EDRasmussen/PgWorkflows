@@ -366,7 +366,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var deadRun = deadWorker.RunAsync(crash.Token);
         await started.Task; // first attempt is leased and executing
 
-        crash.Cancel(); // worker process "dies" — stops renewing its lease
+        crash.Cancel(); // worker process "dies"; stops renewing its lease
         await SwallowCancellation(deadRun);
 
         // The live worker should reclaim after the lease expires and finish the job.
@@ -415,7 +415,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // Regression: a worker must not lease more jobs than it can keep alive. With
         // BatchSize > MaxConcurrency, the jobs queued behind the concurrency limit have
         // no renewer running while they wait, so their lease lapses and a second worker
-        // reclaims and re-executes them — exactly the back-of-batch double-execution the
+        // reclaims and re-executes them, exactly the back-of-batch double-execution the
         // heartbeat work set out to prevent.
         var firstLeased = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously
@@ -441,7 +441,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
 
         var lease = TimeSpan.FromMilliseconds(400);
         // A grabs the batch but runs one at a time; B runs anything reclaimable. Starting B
-        // only once A's first handler is running guarantees A won the batch — without that,
+        // only once A's first handler is running guarantees A won the batch; without that,
         // B might lease everything first and the test wouldn't exercise the bug.
         var workerA = new ActivityWorker(
             registry,
@@ -484,8 +484,8 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     public async Task A_failed_commit_does_not_cancel_sibling_jobs_or_kill_the_worker()
     {
         // Regression: when one job's outcome fails to record (a real store error), it must
-        // not fault the Parallel batch — the sibling jobs running alongside it must still
-        // finish — nor kill the worker loop. The failed job stays leased and is retried
+        // not fault the Parallel batch (the sibling jobs running alongside it must still
+        // finish) nor kill the worker loop. The failed job stays leased and is retried
         // after its lease expires.
         const int jobCount = 4;
         var executions = new ConcurrentDictionary<Guid, int>();

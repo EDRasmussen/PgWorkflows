@@ -608,7 +608,7 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         // Lock the run row and verify the lease in one statement, serializing consumption against
-        // RecordSignalAsync and fencing out a worker whose lease was taken over — otherwise two
+        // RecordSignalAsync and fencing out a worker whose lease was taken over; otherwise two
         // executors at the same wait could each claim a different signal, diverging from replay.
         const string leaseSql = """
             select 1
@@ -804,7 +804,7 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
 
         if (inserted is null or DBNull)
         {
-            // Duplicate idempotent delivery: nothing new buffered, so skip the wake — it would only
+            // Duplicate idempotent delivery: nothing new buffered, so skip the wake; it would only
             // force a replay that finds nothing to consume. Return the existing signal's id.
             const string existingSql = """
                 select signal_id
@@ -1370,7 +1370,7 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
 
     /// <summary>
     /// Shared shape of every park: flip the run back to pending, roll back the attempt the lease
-    /// charged (a park is not a failed attempt), clear completion state, and release the lease —
+    /// charged (a park is not a failed attempt), clear completion state, and release the lease,
     /// guarded by the lease token so a lost lease writes nothing. Only the visible_at policy
     /// differs per wait kind.
     /// </summary>

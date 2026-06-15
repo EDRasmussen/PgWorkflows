@@ -12,7 +12,7 @@
     <PackageId>PgWorkflows</PackageId>
     <Version>0.1.0</Version>
     <Authors>Emil Due Rasmussen</Authors>
-    <Description>Durable workflows on Postgres: plain async C# methods become crash-proof, exactly-once orchestrations. No separate server — workers, leases, timers, and signals all live in a handful of Postgres tables.</Description>
+    <Description>Durable workflows on Postgres: plain async C# methods become crash-proof, exactly-once orchestrations. No separate server: workers, leases, timers, and signals all live in a handful of Postgres tables.</Description>
     <PackageTags>workflow;durable-execution;postgres;postgresql;orchestration;background-jobs;saga;temporal</PackageTags>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageReadmeFile>README.md</PackageReadmeFile>

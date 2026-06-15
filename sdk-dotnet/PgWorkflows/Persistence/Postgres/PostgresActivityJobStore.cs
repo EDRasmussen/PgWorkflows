@@ -433,10 +433,10 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
 
     /// <summary>
     /// Records a terminal job outcome under the lease guard and, in the same transaction, wakes the
-    /// parent run by pulling its parked <c>visible_at</c> forward — atomic, so a crash can't leave a
+    /// parent run by pulling its parked <c>visible_at</c> forward. This is atomic, so a crash can't leave a
     /// completed job whose parent was never woken. Every completion wakes (not just the last
     /// sibling): a fan-out may resume-and-re-park a few times, harmless since replay is idempotent.
-    /// Not gated on "no siblings remain" — that check races under concurrent completions and loses
+    /// Not gated on "no siblings remain": that check races under concurrent completions and loses
     /// the wake. Returns <c>false</c> when the lease was lost.
     /// </summary>
     private async ValueTask<bool> RecordTerminalAndWakeAsync(

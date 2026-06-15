@@ -17,7 +17,7 @@ docker run -p 3000:3000 \
   ghcr.io/edrasmussen/pgworkflows-dashboard
 ```
 
-Then open <http://localhost:3000>. `DATABASE_URL` is the only configuration — point it at
+Then open <http://localhost:3000>. `DATABASE_URL` is the only configuration. Point it at
 the database your workers use. The dashboard only reads, so a read-only role works.
 
 The repo's `docker compose up --build -d` starts it alongside the example stack.

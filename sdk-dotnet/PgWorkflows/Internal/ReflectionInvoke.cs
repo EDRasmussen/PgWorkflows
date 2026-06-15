@@ -10,7 +10,7 @@ internal static class ReflectionInvoke
 {
     /// <summary>
     /// Invokes the method, unwrapping <see cref="TargetInvocationException"/> so the user's own
-    /// exception propagates with its original stack trace — recorded errors must point at the
+    /// exception propagates with its original stack trace. Recorded errors must point at the
     /// user's code, not the reflection call site.
     /// </summary>
     public static object? InvokeUnwrapped(MethodInfo method, object? instance, object?[] args)

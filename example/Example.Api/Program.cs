@@ -11,7 +11,7 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddOpenApi();
 
-// Pure client: starts workflows but never executes them — the worker fleet does.
+// Pure client: starts workflows but never executes them; the worker fleet does.
 builder.Services.AddPgWorkflows(pg =>
     pg.UsePostgres(connectionString).DisableWorkers().AddWorkflow<GreetingWorkflow>()
 );

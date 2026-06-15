@@ -50,7 +50,7 @@ internal sealed class ActivityWorker(
         );
 
         // A job whose outcome couldn't be recorded (a real store error, not the expected lease-lost
-        // race) is collected, not thrown — a throw would cancel sibling jobs. Surfaced after the
+        // race) is collected, not thrown; a throw would cancel sibling jobs. Surfaced after the
         // batch so the caller can back off; the job stays leased and retries after expiry.
         var writeErrors = new ConcurrentBag<Exception>();
 
@@ -217,7 +217,7 @@ internal sealed class ActivityWorker(
             jobCts.Cancel();
         }
 
-        // Lease reclaimed mid-execution: another worker owns the job, so write nothing —
+        // Lease reclaimed mid-execution: another worker owns the job, so write nothing;
         // recording would clobber it.
         if (leaseLost)
         {
@@ -230,7 +230,7 @@ internal sealed class ActivityWorker(
             return null;
         }
 
-        // If the handler finished, record the outcome even mid-shutdown — the work is done and we
+        // If the handler finished, record the outcome even mid-shutdown; the work is done and we
         // hold the lease, so persisting avoids a re-run. Only abandon if shutdown cancelled it first.
         var shuttingDown = cancellationToken.IsCancellationRequested;
         if (shuttingDown && handlerError is not null)
@@ -323,8 +323,8 @@ internal sealed class ActivityWorker(
         return failureRecord.Error;
     }
 
-    // Handles the two ways a terminal write fails to land — lease lost (benign; the new holder
-    // records it) or a store error — uniformly. Returns true when the write landed under a held
+    // Handles the two ways a terminal write fails to land: lease lost (benign; the new holder
+    // records it) or a store error, the same way. Returns true when the write landed under a held
     // lease, so the caller emits its outcome-specific telemetry. outcome is "Success" or "Failure".
     private bool RecordLanded(
         RecordAttempt record,

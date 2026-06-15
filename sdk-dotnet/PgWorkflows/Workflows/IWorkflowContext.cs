@@ -21,7 +21,7 @@ public interface IWorkflowContext
     /// </summary>
     /// <remarks>
     /// Parking is implemented by throwing an internal control-flow exception, so do not wrap
-    /// <c>Sleep</c> in a broad <c>catch</c> — doing so swallows the park. If that happens the run
+    /// <c>Sleep</c> in a broad <c>catch</c>; doing so swallows the park. If that happens the run
     /// fails loudly rather than silently skipping the timer.
     /// </remarks>
     ValueTask Sleep(TimeSpan duration, CancellationToken cancellationToken = default);
@@ -43,7 +43,7 @@ public interface IWorkflowContext
     /// <summary>
     /// Creates a pending activity for fan-out composition with <c>WhenAll</c>, without awaiting
     /// it. The lambda must be a direct method call on the activity class, e.g.
-    /// <c>ctx.CallActivity((MyActivities a) =&gt; a.DoWork(input))</c> — that is how PgWorkflows
+    /// <c>ctx.CallActivity((MyActivities a) =&gt; a.DoWork(input))</c>; that is how PgWorkflows
     /// knows which activity to enqueue and with which arguments.
     /// </summary>
     WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(

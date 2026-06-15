@@ -143,7 +143,7 @@ public sealed class PgWorkflowsBuilder
     /// <summary>
     /// Finalizes the connection pool now that worker concurrency is known. When the pool was not set
     /// explicitly it is sized to the concurrency the workers need, so the two stay coupled by
-    /// construction — there is nothing to reconcile. An explicit pool that is too small fails fast.
+    /// construction; there is nothing to reconcile. An explicit pool that is too small fails fast.
     /// </summary>
     internal void FinalizeConnectionPool()
     {
@@ -198,7 +198,7 @@ public sealed class PgWorkflowsBuilder
 
     /// <summary>
     /// Makes this registration client-only: the process can start, signal, and await workflows
-    /// through <see cref="IPgWorkflowClient"/>, but runs no background workers — started runs are
+    /// through <see cref="IPgWorkflowClient"/>, but runs no background workers; started runs are
     /// executed by other processes pointed at the same database. Use this in a front-facing API
     /// that dispatches work to a separately scaled worker fleet.
     /// </summary>
@@ -237,7 +237,7 @@ public sealed class PgWorkflowsBuilder
     }
 
     /// <summary>
-    /// Registers a single delegate-based activity under an explicit durable name — a low-level
+    /// Registers a single delegate-based activity under an explicit durable name, a low-level
     /// escape hatch next to <see cref="AddActivities{TActivities}"/>. Input and output are
     /// JSON-serialized at the boundary.
     /// </summary>
