@@ -19,14 +19,21 @@ await ctx.Activity((EmailActivities a) => a.SendTrialEndingReminder(input.Email)
 
 ## How it works
 
-<!-- TODO: the run's visible_at is pushed into the future and its lease released; the
-     workflow worker picks it back up when the timer fires. The deadline is persisted on
-     first encounter, so it stays stable across replays; resuming doesn't restart the
-     clock. -->
+When the workflow reaches `ctx.Sleep`, the run's `visible_at` is pushed to the deadline
+and its lease is released, freeing the worker for other work immediately. When the
+deadline passes, the run becomes visible again and the next free worker resumes it,
+replaying the already-completed steps from their stored results.
+
+The deadline is persisted the first time the sleep is encountered, so it stays stable
+across replays: a run that crashes and resumes mid-sleep does not restart the clock, and
+a sleep that already elapsed is skipped on replay instead of sleeping again.
 
 ## Caveats
 
-<!-- TODO, from the API docs:
-     - Parking is implemented via an internal control-flow exception, so don't wrap
-       ctx.Sleep in a broad catch, or the park is swallowed (the run then fails loudly
-       rather than silently skipping the timer). -->
+Parking is implemented by throwing an internal control-flow exception that unwinds the
+workflow method, so don't wrap `ctx.Sleep` in a broad `catch`, which would swallow the
+park. If it happens, the run fails loudly rather than silently skipping the timer.
+
+Timer precision is bounded by worker polling: the run resumes on the first poll after
+the deadline, so the resolution is roughly the worker's `PollInterval` (250 ms by
+default). For sleeps measured in minutes to months this is irrelevant.

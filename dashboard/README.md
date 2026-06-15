@@ -1,42 +1,33 @@
-# sv
+# PgWorkflows dashboard
 
-Everything you need to build a Svelte project, powered by [`sv`](https://github.com/sveltejs/cli).
+A read-only web UI for the PgWorkflows tables: live run feed with status filters and keyset
+pagination, plus a per-run detail view of steps, timers, signal waits, and failure hooks. It
+connects straight to your Postgres and needs nothing else.
 
-## Creating a project
-
-If you're seeing this, you've probably already done this step. Congrats!
-
-```sh
-# create a new project
-npx sv create my-app
-```
-
-To recreate this project with the same configuration:
+## Run it
 
 ```sh
-# recreate this project
-pnpm dlx sv@0.15.4 create --template minimal --types ts --add tailwindcss="plugins:none" --install pnpm dashboard
+docker run -p 3000:3000 \
+  -e DATABASE_URL=postgres://user:pass@host:5432/yourdb \
+  ghcr.io/edrasmussen/pgworkflows-dashboard
 ```
 
-## Developing
+Then open <http://localhost:3000>. `DATABASE_URL` is the only configuration; point it at the
+database your workers use. The dashboard only reads, so a read-only role works.
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+## Develop
 
 ```sh
-npm run dev
-
-# or start the server and open the app in a new browser tab
-npm run dev -- --open
+pnpm install
+cp .env.example .env
+pnpm dev
 ```
 
-## Building
+The repo's `docker compose up --build -d` starts Postgres, the example API and workers, and this
+dashboard together.
 
-To create a production version of your app:
+After a schema change in the SDK, regenerate the typed table definitions:
 
 ```sh
-npm run build
+pnpm db:codegen
 ```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://svelte.dev/docs/kit/adapters) for your target environment.

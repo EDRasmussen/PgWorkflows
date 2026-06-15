@@ -26,6 +26,7 @@ export default defineConfig({
             { label: "Sleep", slug: "sleep" },
             { label: "Signals", slug: "signals" },
             { label: "Error handling", slug: "error-handling" },
+            { label: "Observability", slug: "observability" },
           ],
         },
         {

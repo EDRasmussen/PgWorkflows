@@ -118,5 +118,22 @@ static PgWorkflows.Workers.ActivityWorkerOptions.operator !=(PgWorkflows.Workers
 static PgWorkflows.Workers.ActivityWorkerOptions.operator ==(PgWorkflows.Workers.ActivityWorkerOptions? left, PgWorkflows.Workers.ActivityWorkerOptions? right) -> bool
 static PgWorkflows.Workers.WorkflowWorkerOptions.operator !=(PgWorkflows.Workers.WorkflowWorkerOptions? left, PgWorkflows.Workers.WorkflowWorkerOptions? right) -> bool
 static PgWorkflows.Workers.WorkflowWorkerOptions.operator ==(PgWorkflows.Workers.WorkflowWorkerOptions? left, PgWorkflows.Workers.WorkflowWorkerOptions? right) -> bool
-static readonly PgWorkflows.Persistence.Postgres.PostgresSchema.Sql -> string!
 static readonly PgWorkflows.PgWorkflowsTelemetry.ActivitySource -> System.Diagnostics.ActivitySource!
+override PgWorkflows.Persistence.Postgres.PostgresMigration.Equals(object? obj) -> bool
+override PgWorkflows.Persistence.Postgres.PostgresMigration.GetHashCode() -> int
+override PgWorkflows.Persistence.Postgres.PostgresMigration.ToString() -> string!
+PgWorkflows.Persistence.Postgres.PostgresMigration
+PgWorkflows.Persistence.Postgres.PostgresMigration.<Clone>$() -> PgWorkflows.Persistence.Postgres.PostgresMigration!
+PgWorkflows.Persistence.Postgres.PostgresMigration.Deconstruct(out int Version, out string! Name, out string! Sql) -> void
+PgWorkflows.Persistence.Postgres.PostgresMigration.Equals(PgWorkflows.Persistence.Postgres.PostgresMigration? other) -> bool
+PgWorkflows.Persistence.Postgres.PostgresMigration.Name.get -> string!
+PgWorkflows.Persistence.Postgres.PostgresMigration.Name.init -> void
+PgWorkflows.Persistence.Postgres.PostgresMigration.PostgresMigration(int Version, string! Name, string! Sql) -> void
+PgWorkflows.Persistence.Postgres.PostgresMigration.Sql.get -> string!
+PgWorkflows.Persistence.Postgres.PostgresMigration.Sql.init -> void
+PgWorkflows.Persistence.Postgres.PostgresMigration.Version.get -> int
+PgWorkflows.Persistence.Postgres.PostgresMigration.Version.init -> void
+static PgWorkflows.Persistence.Postgres.PostgresMigration.operator !=(PgWorkflows.Persistence.Postgres.PostgresMigration? left, PgWorkflows.Persistence.Postgres.PostgresMigration? right) -> bool
+static PgWorkflows.Persistence.Postgres.PostgresMigration.operator ==(PgWorkflows.Persistence.Postgres.PostgresMigration? left, PgWorkflows.Persistence.Postgres.PostgresMigration? right) -> bool
+static PgWorkflows.Persistence.Postgres.PostgresSchema.Migrations.get -> System.Collections.Generic.IReadOnlyList<PgWorkflows.Persistence.Postgres.PostgresMigration!>!
+static readonly PgWorkflows.Persistence.Postgres.PostgresSchema.MigrationsTableSql -> string!

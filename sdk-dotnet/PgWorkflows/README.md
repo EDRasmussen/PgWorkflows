@@ -1,8 +1,79 @@
 # PgWorkflows
 
-Durable workflows on Postgres. Plain async C# methods become crash-proof, exactly-once
-orchestrations — no separate server, no replay rules to learn. Your app and a handful of
-Postgres tables do all the work.
+Durable workflows built on PostgreSQL.
+
+PgWorkflows lets you build long-running, scalable, durable workflows on top of the Postgres database
+you already run. You don't need to host a separate workflow server or adopt a vendor ecosystem; a
+connection string is enough.
+
+**Docs:** [pgworkflows.emildr.dk](https://pgworkflows.emildr.dk)
+
+## Features
+
+- **Durable execution**: workflow state lives in Postgres and survives restarts and deploys
+- **Fan-in / fan-out**: run activities in parallel and join the results
+- **Durable timers**: sleep for days without a worker holding anything in memory
+- **Signals**: park a workflow until an external event arrives, like a human decision
+- **Scales with your workers**: add more workers when you need more throughput, without a
+  coordinator service
+
+## Quick start
+
+Install the package:
+
+```sh
+dotnet add package PgWorkflows
+```
+
+Register PgWorkflows with your Postgres connection string:
+
+```csharp
+builder.Services.AddPgWorkflows(pg =>
+    pg.UsePostgres(connectionString)
+        .AddWorkflow<GreetingWorkflow>()
+        .AddActivities<HelloActivities>()
+);
+```
+
+Define a workflow. A workflow is an ordinary C# class, and activities hold the side effects:
+
+```csharp
+[Workflow("greeting")]
+public sealed class GreetingWorkflow
+{
+    [WorkflowRun]
+    public async ValueTask<string> RunAsync(
+        IWorkflowContext ctx,
+        string name,
+        CancellationToken cancellationToken
+    )
+    {
+        return await ctx.Activity(
+            (HelloActivities a) => a.Hello(name),
+            cancellationToken
+        );
+    }
+}
+
+public sealed class HelloActivities
+{
+    [Activity("hello")]
+    public string Hello(string name) => $"Hello, {name}!";
+}
+```
+
+Start it:
+
+```csharp
+var workflows = app.Services.GetRequiredService<IPgWorkflowClient>();
+var result = await workflows.ExecuteAsync<GreetingWorkflow, string, string>("Postgres");
+```
+
+See the [get started guide](https://pgworkflows.emildr.dk/get-started/) for the full walkthrough.
+
+## A real-world example
+
+Fan-out, durable sleep, and human-in-the-loop signals in one workflow:
 
 ```csharp
 [Workflow("trial-onboarding")]
@@ -10,50 +81,66 @@ public sealed class TrialOnboardingWorkflow
 {
     [WorkflowRun]
     public async ValueTask<string> RunAsync(
-        IWorkflowContext ctx, SignupInput input, CancellationToken ct)
+        IWorkflowContext ctx,
+        SignupInput input,
+        CancellationToken cancellationToken
+    )
     {
-        await ctx.Activity((EmailActivities a) => a.SendWelcome(input.Email), ct);
+        // Fan-out: run independent activities in parallel.
+        var (workspace, _) = await ctx.WhenAll(
+            ctx.CallActivity((OnboardingActivities a) => a.ProvisionWorkspace(input.Company)),
+            ctx.CallActivity((EmailActivities a) => a.SendWelcome(input.Email)),
+            cancellationToken
+        );
 
-        await ctx.Sleep(TimeSpan.FromDays(11), ct);   // survives restarts and deploys
+        // Durable timer: the run is parked in Postgres. It survives
+        // restarts and deploys, and no worker holds it in memory.
+        await ctx.Sleep(TimeSpan.FromDays(11), cancellationToken);
 
-        var decision = await ctx.WaitForSignal<UpgradeDecision>("upgrade", ct);
-        return decision.Plan;
+        await ctx.Activity(
+            (EmailActivities a) => a.SendTrialEndingReminder(input.Email),
+            cancellationToken
+        );
+
+        // Human-in-the-loop: park again until an external signal arrives.
+        var decision = await ctx.WaitForSignal<UpgradeDecision>("upgrade", cancellationToken);
+
+        if (!decision.Upgraded)
+        {
+            await ctx.Activity(
+                (OnboardingActivities a) => a.DowngradeToFreeTier(workspace.Id),
+                cancellationToken
+            );
+            return $"{input.Company} stayed on the free tier.";
+        }
+
+        await ctx.Activity(
+            (BillingActivities a) => a.StartSubscription(workspace.Id, decision.Plan),
+            cancellationToken
+        );
+        return $"{input.Company} upgraded to {decision.Plan}.";
     }
 }
 ```
 
-Every `ctx.*` call is a durable step: results are persisted, and if the process dies
-another worker resumes the run — already-completed steps return their stored results
-instead of re-running, so side effects happen exactly once.
+## Example project
 
-## Getting started
-
-```csharp
-builder.Services.AddPgWorkflows(pg =>
-    pg.UsePostgres(connectionString)
-        .AddWorkflow<TrialOnboardingWorkflow>()
-        .AddActivities<EmailActivities>()
-);
-```
-
-That's a complete worker: it creates the schema, then leases and executes workflows and
-activities in the background. Start a run from anywhere:
-
-```csharp
-var handle = await workflows.StartAsync<TrialOnboardingWorkflow, SignupInput, string>(
-    input, idempotencyKey: $"signup:{signupId}");
-```
-
-## What you get
-
-- **Durable steps** — activity results are memoized per run; crashes and deploys resume, never re-run.
-- **Fan-out / fan-in** — `ctx.WhenAll(...)` dispatches activities concurrently and parks the run until all land.
-- **Durable timers** — `ctx.Sleep(...)` parks the run in the database; sleeping costs no thread or worker slot.
-- **Signals** — `ctx.WaitForSignal<T>(...)` with buffering, FIFO consumption, and idempotent delivery.
-- **Failure hooks** — saga-style compensation via `ctx.OnFailure(...)` after terminal failure.
-- **Scale out by running more instances** — workers coordinate through `FOR UPDATE SKIP LOCKED` leases with heartbeats and crash reclaim.
-- **Observable** — structured logging, OpenTelemetry spans, and plain SQL-inspectable state.
+The [repository](https://github.com/EDRasmussen/PgWorkflows) contains a runnable
+[example project](https://github.com/EDRasmussen/PgWorkflows/tree/main/example) that shows a
+simplified recommended production topology: an ASP.NET API acting as a pure client and three worker
+instances competing for runs, with the workflows shared through a class library.
 
 ## Learn more
 
-Documentation, examples, and source: [github.com/EDRasmussen/PgWorkflows](https://github.com/EDRasmussen/PgWorkflows)
+- [Get started](https://pgworkflows.emildr.dk/get-started/) walks you through your first workflow in
+  about five minutes
+- [How it works](https://pgworkflows.emildr.dk/how-it-works/) explains the mental model under the
+  hood
+- [Fan-in fan-out](https://pgworkflows.emildr.dk/fan-in-fan-out/),
+  [Sleep](https://pgworkflows.emildr.dk/sleep/), [Signals](https://pgworkflows.emildr.dk/signals/),
+  [Error handling](https://pgworkflows.emildr.dk/error-handling/)
+
+## License
+
+PgWorkflows is licensed under the
+[MIT License](https://github.com/EDRasmussen/PgWorkflows/blob/main/LICENSE).
