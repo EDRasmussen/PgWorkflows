@@ -12,4 +12,5 @@ public sealed record ActivityExecutionContext(
     Guid JobId,
     string ActivityName,
     int Attempt,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt
+);

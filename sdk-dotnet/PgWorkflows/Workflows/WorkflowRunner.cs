@@ -97,8 +97,8 @@ internal sealed class WorkflowRunner(
     )
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
-        // A null payload would round-trip through JSON 'null' to a null-forgiven null in
-        // WaitForSignal<TSignal>, surfacing as an NRE inside the workflow, far from the sender.
+        // A null payload would deserialize to null in WaitForSignal<TSignal> and surface as an NRE
+        // inside the workflow, far from the sender.
         ArgumentNullException.ThrowIfNull(signal);
         var payloadJson = JsonSerializer.Serialize(signal, _jsonSerializerOptions);
         await _workflowStore.RecordSignalAsync(
@@ -150,10 +150,9 @@ internal sealed class WorkflowRunner(
 
             if (context.ParkRequested)
             {
-                // ctx.Sleep or an activity wait threw to park the run, but the workflow completed
-                // anyway, so user code swallowed the control-flow exception (e.g. a broad try/catch
-                // around ctx.Sleep / ctx.Activity / ctx.WhenAll). Fail loudly instead of silently
-                // recording success and skipping the suspend.
+                // The workflow completed despite requesting a park, so user code swallowed the
+                // control-flow exception. Fail loudly instead of recording success and skipping the
+                // suspend.
                 throw new InvalidOperationException(
                     "Workflow completed after it requested a durable park (ctx.Sleep, ctx.WaitForSignal, or an activity "
                         + "wait); its internal control-flow exception was swallowed. Do not wrap "
@@ -186,14 +185,12 @@ internal sealed class WorkflowRunner(
                 leaseToken,
                 CancellationToken.None
             );
-            return parked
-                ? WorkflowExecutionOutcome.Sleeping
-                : WorkflowExecutionOutcome.LeaseLost;
+            return parked ? WorkflowExecutionOutcome.Sleeping : WorkflowExecutionOutcome.LeaseLost;
         }
         catch (WorkflowSignalWaitException signalWait)
         {
-            // Unlike activity parks there is no grace deadline: a signal may take days to arrive,
-            // so the run parks open-ended and signal delivery wakes it via the edge-trigger.
+            // No grace deadline: a signal may take days, so the run parks open-ended and signal
+            // delivery wakes it via the edge-trigger.
             var parked = await _workflowStore.RecordRunWaitingForSignalAsync(
                 workflowRunId,
                 signalWait.WaitSequence,
@@ -207,9 +204,8 @@ internal sealed class WorkflowRunner(
         }
         catch (WorkflowParkException)
         {
-            // The run is waiting on outstanding activity steps: release the lease and park until the
-            // edge-trigger wakes it (or ParkGrace elapses as a backstop). Control flow, not failure.
-            // Any other exception propagates to the workflow worker, which records the failure.
+            // Waiting on activity steps: park until the edge-trigger wakes it (or ParkGrace elapses).
+            // Control flow, not failure; other exceptions propagate to the worker, which records it.
             var parked = await _workflowStore.RecordRunWaitingAsync(
                 workflowRunId,
                 leaseToken,

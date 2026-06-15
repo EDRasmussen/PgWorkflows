@@ -27,6 +27,7 @@ export default defineConfig({
             { label: "Signals", slug: "signals" },
             { label: "Error handling", slug: "error-handling" },
             { label: "Observability", slug: "observability" },
+            { label: "Dashboard", slug: "dashboard" },
           ],
         },
         {

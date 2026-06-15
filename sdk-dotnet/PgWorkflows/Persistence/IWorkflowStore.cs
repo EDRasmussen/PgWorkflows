@@ -9,7 +9,10 @@ internal interface IWorkflowStore
         CancellationToken cancellationToken = default
     );
 
-    ValueTask<WorkflowRun?> GetRunAsync(Guid workflowRunId, CancellationToken cancellationToken = default);
+    ValueTask<WorkflowRun?> GetRunAsync(
+        Guid workflowRunId,
+        CancellationToken cancellationToken = default
+    );
 
     ValueTask<IReadOnlyList<LeasedWorkflowRun>> LeaseRunsAsync(
         string workerId,

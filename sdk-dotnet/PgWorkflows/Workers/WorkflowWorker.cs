@@ -193,8 +193,8 @@ internal sealed class WorkflowWorker(
             activity?.SetTag("pgworkflows.workflow.outcome", OutcomeTag(outcome));
             if (outcome == WorkflowExecutionOutcome.LeaseLost)
             {
-                // The run executed but the outcome write lost the lease race: nothing was
-                // written and another worker owns the run now.
+                // The run executed but the outcome write lost the lease race: nothing written,
+                // another worker owns it now.
                 activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
                 _logger?.LogWarning(
                     "Outcome for workflow run {WorkflowRunId} ({WorkflowName}) was not recorded because the lease was lost.",
@@ -204,8 +204,7 @@ internal sealed class WorkflowWorker(
             }
             else
             {
-                // Completed or durably parked (sleep, signal, or activity wait); either way this
-                // worker's pass over the run succeeded.
+                // Completed or durably parked; either way this worker's pass over the run succeeded.
                 activity?.SetStatus(ActivityStatusCode.Ok);
             }
         }
@@ -225,9 +224,8 @@ internal sealed class WorkflowWorker(
         }
         catch (Exception ex) when (TransientErrors.IsTransient(ex))
         {
-            // The database was unreachable or overloaded; the workflow itself did not fail.
-            // Release the run (rolling back the attempt the lease charged) and rethrow so the
-            // worker loop backs off instead of hammering an exhausted database.
+            // The database was unreachable, not the workflow. Release the run (rolling back the
+            // lease's attempt) and rethrow so the worker loop backs off instead of hammering it.
             activity?.SetStatus(ActivityStatusCode.Error, "transient infrastructure error");
             await ReleaseRunAfterTransientErrorAsync(leasedRun, ex);
             throw;
@@ -355,5 +353,4 @@ internal sealed class WorkflowWorker(
             leasedRun.MaxAttempts
         );
     }
-
 }

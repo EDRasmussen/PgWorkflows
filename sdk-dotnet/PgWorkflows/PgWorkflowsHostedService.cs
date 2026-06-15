@@ -13,7 +13,8 @@ internal sealed class PgWorkflowsHostedService(
 ) : IHostedService
 {
     private readonly ActivityWorker? _worker = worker;
-    private readonly IActivityJobStore _store = store ?? throw new ArgumentNullException(nameof(store));
+    private readonly IActivityJobStore _store =
+        store ?? throw new ArgumentNullException(nameof(store));
     private readonly WorkflowWorker? _workflowWorker = workflowWorker;
     private readonly bool _ensurePostgresSchemaOnStart = ensurePostgresSchemaOnStart;
     private CancellationTokenSource? _stopping;

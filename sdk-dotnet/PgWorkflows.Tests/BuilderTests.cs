@@ -58,7 +58,10 @@ public sealed class BuilderTests
     [Fact]
     public void UsePostgres_sizes_the_pool_to_worker_concurrency_by_default()
     {
-        var connectionString = WorkerConnectionString(activityConcurrency: 15, workflowConcurrency: 15);
+        var connectionString = WorkerConnectionString(
+            activityConcurrency: 15,
+            workflowConcurrency: 15
+        );
 
         // 15 + 15 + ConnectionHeadroom — the pool follows concurrency with no explicit setting.
         Assert.Equal(
@@ -72,8 +75,18 @@ public sealed class BuilderTests
         var services = new ServiceCollection();
         services.AddPgWorkflows(pg =>
             pg.UsePostgres("Host=localhost;Username=u;Password=p")
-                .ConfigureActivityWorker(options => options with { MaxConcurrency = activityConcurrency })
-                .ConfigureWorkflowWorker(options => options with { MaxConcurrency = workflowConcurrency })
+                .ConfigureActivityWorker(options =>
+                    options with
+                    {
+                        MaxConcurrency = activityConcurrency,
+                    }
+                )
+                .ConfigureWorkflowWorker(options =>
+                    options with
+                    {
+                        MaxConcurrency = workflowConcurrency,
+                    }
+                )
         );
 
         using var provider = services.BuildServiceProvider();

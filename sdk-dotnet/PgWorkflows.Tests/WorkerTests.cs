@@ -41,8 +41,14 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     public async Task Worker_runs_typed_activity_and_persists_typed_result()
     {
         var registry = new ActivityRegistry();
-        registry.Register("typed-greet", static (GreetingInput input) => new GreetingOutput($"hello {input.Name}"));
-        registry.Register("uppercase", static (GreetingInput input) => new GreetingActivities().Uppercase(input));
+        registry.Register(
+            "typed-greet",
+            static (GreetingInput input) => new GreetingOutput($"hello {input.Name}")
+        );
+        registry.Register(
+            "uppercase",
+            static (GreetingInput input) => new GreetingActivities().Uppercase(input)
+        );
         var greetingId = await Store.EnqueueTypedAsync("typed-greet", new GreetingInput("world"));
         var uppercaseId = await Store.EnqueueTypedAsync("uppercase", new GreetingInput("world"));
         var worker = new ActivityWorker(registry, Store, Options("w1"));
@@ -87,7 +93,11 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             }
         );
         var first = await Store.EnqueueTypedAsync("dedupe-run", "first", idempotencyKey: "order-2");
-        var second = await Store.EnqueueTypedAsync("dedupe-run", "second", idempotencyKey: "order-2");
+        var second = await Store.EnqueueTypedAsync(
+            "dedupe-run",
+            "second",
+            idempotencyKey: "order-2"
+        );
         var worker = new ActivityWorker(registry, Store, Options("w1"));
 
         var firstBatch = await worker.RunOnceAsync();
@@ -104,8 +114,16 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     [Fact]
     public async Task Same_idempotency_key_is_scoped_by_activity_name()
     {
-        var first = await Store.EnqueueTypedAsync("dedupe-a", "input", idempotencyKey: "shared-key");
-        var second = await Store.EnqueueTypedAsync("dedupe-b", "input", idempotencyKey: "shared-key");
+        var first = await Store.EnqueueTypedAsync(
+            "dedupe-a",
+            "input",
+            idempotencyKey: "shared-key"
+        );
+        var second = await Store.EnqueueTypedAsync(
+            "dedupe-b",
+            "input",
+            idempotencyKey: "shared-key"
+        );
 
         Assert.NotEqual(first, second);
         Assert.Equal(1, await CountJobsAsync("dedupe-a", "shared-key"));
@@ -126,8 +144,13 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     public async Task Concurrent_enqueues_with_same_idempotency_key_create_one_job()
     {
         var ids = await Task.WhenAll(
-            Enumerable.Range(0, 32)
-                .Select(i => Store.EnqueueTypedAsync("dedupe-concurrent", i, idempotencyKey: "order-3").AsTask())
+            Enumerable
+                .Range(0, 32)
+                .Select(i =>
+                    Store
+                        .EnqueueTypedAsync("dedupe-concurrent", i, idempotencyKey: "order-3")
+                        .AsTask()
+                )
         );
 
         var id = Assert.Single(ids.Distinct());
@@ -224,7 +247,10 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var worker = new ActivityWorker(
             registry,
             Store,
-            Options("w1") with { GetRetryDelay = static _ => TimeSpan.Zero }
+            Options("w1") with
+            {
+                GetRetryDelay = static _ => TimeSpan.Zero,
+            }
         );
 
         // Drain: three executions, then the job is terminal and further runs are no-ops.
@@ -259,8 +285,22 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var jobId = await Store.EnqueueTypedAsync("slow", (object?)null, maxAttempts: 5);
 
         var lease = TimeSpan.FromSeconds(1);
-        var workerA = new ActivityWorker(registry, Store, Options("A") with { LeaseDuration = lease });
-        var workerB = new ActivityWorker(registry, Store, Options("B") with { LeaseDuration = lease });
+        var workerA = new ActivityWorker(
+            registry,
+            Store,
+            Options("A") with
+            {
+                LeaseDuration = lease,
+            }
+        );
+        var workerB = new ActivityWorker(
+            registry,
+            Store,
+            Options("B") with
+            {
+                LeaseDuration = lease,
+            }
+        );
 
         var runA = workerA.RunOnceAsync().AsTask();
         // Past the 1s lease: without heartbeat, B would reclaim and double-execute here.
@@ -298,11 +338,29 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
                 return "recovered";
             }
         );
-        var jobId = await Store.EnqueueTypedAsync("stalls-then-recovers", (object?)null, maxAttempts: 5);
+        var jobId = await Store.EnqueueTypedAsync(
+            "stalls-then-recovers",
+            (object?)null,
+            maxAttempts: 5
+        );
 
         var lease = TimeSpan.FromSeconds(1);
-        var deadWorker = new ActivityWorker(registry, Store, Options("dead") with { LeaseDuration = lease });
-        var liveWorker = new ActivityWorker(registry, Store, Options("live") with { LeaseDuration = lease });
+        var deadWorker = new ActivityWorker(
+            registry,
+            Store,
+            Options("dead") with
+            {
+                LeaseDuration = lease,
+            }
+        );
+        var liveWorker = new ActivityWorker(
+            registry,
+            Store,
+            Options("live") with
+            {
+                LeaseDuration = lease,
+            }
+        );
 
         using var crash = new CancellationTokenSource();
         var deadRun = deadWorker.RunAsync(crash.Token);
@@ -332,7 +390,12 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // First holder leases as-of the past with a short duration, so its lease is
         // already expired by the time the second worker reclaims as-of now.
         var stale = await Store.LeaseAsync("old", 1, TimeSpan.FromSeconds(1), past.AddSeconds(30));
-        var fresh = await Store.LeaseAsync("new", 1, TimeSpan.FromSeconds(30), DateTimeOffset.UtcNow);
+        var fresh = await Store.LeaseAsync(
+            "new",
+            1,
+            TimeSpan.FromSeconds(30),
+            DateTimeOffset.UtcNow
+        );
 
         Assert.Equal(jobId, Assert.Single(stale).JobId);
         Assert.Equal(jobId, Assert.Single(fresh).JobId);
@@ -354,7 +417,9 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         // no renewer running while they wait, so their lease lapses and a second worker
         // reclaims and re-executes them — exactly the back-of-batch double-execution the
         // heartbeat work set out to prevent.
-        var firstLeased = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstLeased = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
         var executions = new ConcurrentDictionary<Guid, int>();
         var registry = new ActivityRegistry();
         registry.Register<string, string>(
@@ -381,12 +446,22 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var workerA = new ActivityWorker(
             registry,
             Store,
-            Options("A") with { BatchSize = 3, MaxConcurrency = 1, LeaseDuration = lease }
+            Options("A") with
+            {
+                BatchSize = 3,
+                MaxConcurrency = 1,
+                LeaseDuration = lease,
+            }
         );
         var workerB = new ActivityWorker(
             registry,
             Store,
-            Options("B") with { BatchSize = 3, MaxConcurrency = 3, LeaseDuration = lease }
+            Options("B") with
+            {
+                BatchSize = 3,
+                MaxConcurrency = 3,
+                LeaseDuration = lease,
+            }
         );
 
         using var cts = new CancellationTokenSource();
@@ -524,7 +599,10 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var worker = new ActivityWorker(
             registry,
             faulty,
-            Options("backoff") with { PollInterval = TimeSpan.FromMilliseconds(20) }
+            Options("backoff") with
+            {
+                PollInterval = TimeSpan.FromMilliseconds(20),
+            }
         );
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1.5));
@@ -544,7 +622,10 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var worker = new ActivityWorker(
             registry,
             faulty,
-            Options("recover") with { PollInterval = TimeSpan.FromMilliseconds(50) }
+            Options("recover") with
+            {
+                PollInterval = TimeSpan.FromMilliseconds(50),
+            }
         );
 
         using var cts = new CancellationTokenSource();
@@ -640,7 +721,10 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         var worker = new ActivityWorker(
             registry,
             faulty,
-            Options("post-outage") with { PollInterval = TimeSpan.FromMilliseconds(200) }
+            Options("post-outage") with
+            {
+                PollInterval = TimeSpan.FromMilliseconds(200),
+            }
         );
 
         using var cts = new CancellationTokenSource();
@@ -778,7 +862,16 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             string? idempotencyKey = null,
             Guid? workflowRunId = null,
             CancellationToken cancellationToken = default
-        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
+        ) =>
+            inner.EnqueueAsync(
+                activityName,
+                inputJson,
+                maxAttempts,
+                visibleAt,
+                idempotencyKey,
+                workflowRunId,
+                cancellationToken
+            );
 
         public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
             string workerId,
@@ -791,10 +884,18 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
 
-        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
-            inner.RenewLeasesAsync(leases, exp, ct);
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
+            IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
+            DateTimeOffset exp,
+            CancellationToken ct = default
+        ) => inner.RenewLeasesAsync(leases, exp, ct);
 
-        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default)
+        public ValueTask<bool> RecordSuccessAsync(
+            Guid id,
+            string token,
+            string? resultJson,
+            CancellationToken ct = default
+        )
         {
             if (Interlocked.Increment(ref _successAttempts) == 1)
             {
@@ -804,8 +905,14 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             return inner.RecordSuccessAsync(id, token, resultJson, ct);
         }
 
-        public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
-            inner.RecordFailureAsync(id, token, error, retryable, next, ct);
+        public ValueTask<bool> RecordFailureAsync(
+            Guid id,
+            string token,
+            string error,
+            bool retryable,
+            DateTimeOffset? next,
+            CancellationToken ct = default
+        ) => inner.RecordFailureAsync(id, token, error, retryable, next, ct);
     }
 
     private sealed class FaultyStore(
@@ -817,8 +924,9 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     {
         private int _leaseCalls;
         private int _recordSuccessCalls;
-        private readonly TaskCompletionSource _leaseRecovered =
-            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _leaseRecovered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously
+        );
 
         public int LeaseCalls => Volatile.Read(ref _leaseCalls);
 
@@ -834,7 +942,16 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             string? idempotencyKey = null,
             Guid? workflowRunId = null,
             CancellationToken cancellationToken = default
-        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
+        ) =>
+            inner.EnqueueAsync(
+                activityName,
+                inputJson,
+                maxAttempts,
+                visibleAt,
+                idempotencyKey,
+                workflowRunId,
+                cancellationToken
+            );
 
         public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
             string workerId,
@@ -856,10 +973,18 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
 
-        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default) =>
-            inner.RenewLeasesAsync(leases, exp, ct);
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
+            IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
+            DateTimeOffset exp,
+            CancellationToken ct = default
+        ) => inner.RenewLeasesAsync(leases, exp, ct);
 
-        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default)
+        public ValueTask<bool> RecordSuccessAsync(
+            Guid id,
+            string token,
+            string? resultJson,
+            CancellationToken ct = default
+        )
         {
             var call = Interlocked.Increment(ref _recordSuccessCalls);
             if (failRecordSuccess || (failRecordEvery > 0 && call % failRecordEvery == 0))
@@ -870,8 +995,14 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             return inner.RecordSuccessAsync(id, token, resultJson, ct);
         }
 
-        public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
-            inner.RecordFailureAsync(id, token, error, retryable, next, ct);
+        public ValueTask<bool> RecordFailureAsync(
+            Guid id,
+            string token,
+            string error,
+            bool retryable,
+            DateTimeOffset? next,
+            CancellationToken ct = default
+        ) => inner.RecordFailureAsync(id, token, error, retryable, next, ct);
     }
 
     private sealed class RenewCountingStore(IActivityJobStore inner) : IActivityJobStore
@@ -888,25 +1019,53 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
             string? idempotencyKey = null,
             Guid? workflowRunId = null,
             CancellationToken cancellationToken = default
-        ) => inner.EnqueueAsync(activityName, inputJson, maxAttempts, visibleAt, idempotencyKey, workflowRunId, cancellationToken);
+        ) =>
+            inner.EnqueueAsync(
+                activityName,
+                inputJson,
+                maxAttempts,
+                visibleAt,
+                idempotencyKey,
+                workflowRunId,
+                cancellationToken
+            );
 
-        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(string workerId, int batchSize, TimeSpan leaseDuration, DateTimeOffset now, CancellationToken ct = default) =>
-            inner.LeaseAsync(workerId, batchSize, leaseDuration, now, ct);
+        public ValueTask<IReadOnlyList<LeasedActivityJob>> LeaseAsync(
+            string workerId,
+            int batchSize,
+            TimeSpan leaseDuration,
+            DateTimeOffset now,
+            CancellationToken ct = default
+        ) => inner.LeaseAsync(workerId, batchSize, leaseDuration, now, ct);
 
         public ValueTask<ActivityJob?> GetAsync(Guid id, CancellationToken ct = default) =>
             inner.GetAsync(id, ct);
 
-        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(IReadOnlyList<(Guid JobId, string LeaseToken)> leases, DateTimeOffset exp, CancellationToken ct = default)
+        public ValueTask<IReadOnlyList<Guid>> RenewLeasesAsync(
+            IReadOnlyList<(Guid JobId, string LeaseToken)> leases,
+            DateTimeOffset exp,
+            CancellationToken ct = default
+        )
         {
             InterlockedMax(ref _maxRenewBatch, leases.Count);
             return inner.RenewLeasesAsync(leases, exp, ct);
         }
 
-        public ValueTask<bool> RecordSuccessAsync(Guid id, string token, string? resultJson, CancellationToken ct = default) =>
-            inner.RecordSuccessAsync(id, token, resultJson, ct);
+        public ValueTask<bool> RecordSuccessAsync(
+            Guid id,
+            string token,
+            string? resultJson,
+            CancellationToken ct = default
+        ) => inner.RecordSuccessAsync(id, token, resultJson, ct);
 
-        public ValueTask<bool> RecordFailureAsync(Guid id, string token, string error, bool retryable, DateTimeOffset? next, CancellationToken ct = default) =>
-            inner.RecordFailureAsync(id, token, error, retryable, next, ct);
+        public ValueTask<bool> RecordFailureAsync(
+            Guid id,
+            string token,
+            string error,
+            bool retryable,
+            DateTimeOffset? next,
+            CancellationToken ct = default
+        ) => inner.RecordFailureAsync(id, token, error, retryable, next, ct);
     }
 
     private static ActivityWorkerOptions Options(string workerId) =>
@@ -946,8 +1105,7 @@ public sealed class WorkerTests(PostgresFixture fixture) : PostgresTestBase(fixt
     private sealed class GreetingActivities
     {
         [Activity("uppercase")]
-        public GreetingOutput Uppercase(GreetingInput input) =>
-            new(input.Name.ToUpperInvariant());
+        public GreetingOutput Uppercase(GreetingInput input) => new(input.Name.ToUpperInvariant());
     }
 
     private sealed class MultiParamActivities

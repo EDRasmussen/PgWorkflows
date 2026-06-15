@@ -5,5 +5,11 @@ internal sealed record WorkflowDefinition(
     string Name,
     Type InputType,
     Type OutputType,
-    Func<IServiceProvider, IWorkflowContext, object?, CancellationToken, ValueTask<object?>> InvokeAsync
+    Func<
+        IServiceProvider,
+        IWorkflowContext,
+        object?,
+        CancellationToken,
+        ValueTask<object?>
+    > InvokeAsync
 );

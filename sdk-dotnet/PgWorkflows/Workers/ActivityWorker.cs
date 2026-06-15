@@ -23,9 +23,8 @@ internal sealed class ActivityWorker(
 
     public async ValueTask<int> RunOnceAsync(CancellationToken cancellationToken = default)
     {
-        // Never lease more than we can run at once: a job that waits behind the
-        // concurrency limit has no renewer, so its lease would lapse and another worker
-        // would reclaim it. Lease exactly what we can keep alive.
+        // Never lease more than we can run at once: a queued job has no renewer, so its lease
+        // would lapse and another worker would reclaim it.
         var leaseCount = Math.Min(
             Math.Max(_options.BatchSize, 1),
             Math.Max(_options.MaxConcurrency, 1)
@@ -50,11 +49,9 @@ internal sealed class ActivityWorker(
             leasedJobs.Count
         );
 
-        // A job whose outcome couldn't be recorded (a real store error, distinct from the
-        // expected "lease lost" race) is collected rather than thrown from the body —
-        // throwing here would cancel sibling jobs in the batch. We surface it after the
-        // batch so the caller (RunAsync) can back off, while the job stays leased and is
-        // retried after its lease expires.
+        // A job whose outcome couldn't be recorded (a real store error, not the expected lease-lost
+        // race) is collected, not thrown — a throw would cancel sibling jobs. Surfaced after the
+        // batch so the caller can back off; the job stays leased and retries after expiry.
         var writeErrors = new ConcurrentBag<Exception>();
 
         await using (
@@ -155,9 +152,8 @@ internal sealed class ActivityWorker(
             return record.Error;
         }
 
-        // jobCts stops the handler when the lease is lost (the shared heartbeat cancels it — the
-        // handler must stop working on a job it no longer owns) or when the handler returns.
-        // leaseLost records that the cancellation came from lease loss, not a normal finish.
+        // jobCts stops the handler when the lease is lost or when it returns; leaseLost
+        // distinguishes lease loss from a normal finish.
         using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var leaseLost = false;
 
@@ -221,8 +217,8 @@ internal sealed class ActivityWorker(
             jobCts.Cancel();
         }
 
-        // Lease was reclaimed mid-execution: another worker owns the job now, so write
-        // nothing — recording here would clobber that worker.
+        // Lease reclaimed mid-execution: another worker owns the job, so write nothing —
+        // recording would clobber it.
         if (leaseLost)
         {
             activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
@@ -234,9 +230,8 @@ internal sealed class ActivityWorker(
             return null;
         }
 
-        // If the handler finished, record the outcome even mid-shutdown — the work is
-        // already done and we still hold the lease, so persisting it avoids a needless
-        // re-run. Only abandon when shutdown cancelled the handler before it completed.
+        // If the handler finished, record the outcome even mid-shutdown — the work is done and we
+        // hold the lease, so persisting avoids a re-run. Only abandon if shutdown cancelled it first.
         var shuttingDown = cancellationToken.IsCancellationRequested;
         if (shuttingDown && handlerError is not null)
         {
@@ -249,9 +244,8 @@ internal sealed class ActivityWorker(
             return null;
         }
 
-        // During shutdown the worker's token is already cancelled, so bound the final write
-        // with a fresh, time-limited token instead — it must complete the record without
-        // being aborted, but must not hang graceful shutdown indefinitely.
+        // During shutdown the worker's token is already cancelled, so bound the final write with a
+        // fresh time-limited token: complete the record without aborting, but don't hang shutdown.
         using var writeCts = shuttingDown
             ? new CancellationTokenSource(TimeSpan.FromSeconds(5))
             : null;
@@ -260,9 +254,14 @@ internal sealed class ActivityWorker(
         if (handlerError is null)
         {
             var record = await TryRecordAsync(() =>
-                _store.RecordSuccessAsync(leasedJob.JobId, leasedJob.LeaseToken, resultJson, writeToken)
+                _store.RecordSuccessAsync(
+                    leasedJob.JobId,
+                    leasedJob.LeaseToken,
+                    resultJson,
+                    writeToken
+                )
             );
-            if (record is { Error: null, LeaseHeld: true })
+            if (RecordLanded(record, activity, leasedJob, "Success"))
             {
                 activity?.SetStatus(ActivityStatusCode.Ok);
                 _logger?.LogInformation(
@@ -270,25 +269,6 @@ internal sealed class ActivityWorker(
                     leasedJob.JobId,
                     leasedJob.ActivityName,
                     Stopwatch.GetElapsedTime(started).TotalMilliseconds
-                );
-            }
-            else if (record is { Error: null, LeaseHeld: false })
-            {
-                activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
-                _logger?.LogWarning(
-                    "Success for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
-                    leasedJob.JobId,
-                    leasedJob.ActivityName
-                );
-            }
-            else if (record.Error is not null)
-            {
-                activity?.SetStatus(ActivityStatusCode.Error, "success record failed");
-                _logger?.LogError(
-                    record.Error,
-                    "Failed to record success for activity job {JobId} ({ActivityName}).",
-                    leasedJob.JobId,
-                    leasedJob.ActivityName
                 );
             }
 
@@ -310,7 +290,7 @@ internal sealed class ActivityWorker(
                 writeToken
             )
         );
-        if (failureRecord is { Error: null, LeaseHeld: true })
+        if (RecordLanded(failureRecord, activity, leasedJob, "Failure"))
         {
             activity?.SetStatus(ActivityStatusCode.Error, handlerError.Message);
             activity?.AddException(handlerError);
@@ -339,32 +319,55 @@ internal sealed class ActivityWorker(
                 );
             }
         }
-        else if (failureRecord is { Error: null, LeaseHeld: false })
-        {
-            activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
-            _logger?.LogWarning(
-                "Failure for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
-                leasedJob.JobId,
-                leasedJob.ActivityName
-            );
-        }
-        else if (failureRecord.Error is not null)
-        {
-            activity?.SetStatus(ActivityStatusCode.Error, "failure record failed");
-            _logger?.LogError(
-                failureRecord.Error,
-                "Failed to record failure for activity job {JobId} ({ActivityName}).",
-                leasedJob.JobId,
-                leasedJob.ActivityName
-            );
-        }
 
         return failureRecord.Error;
     }
 
-    // A false return means the lease was lost (an expected race) — ignored, the new holder
-    // records the outcome. A thrown exception means a real store error: it's returned so
-    // RunOnceAsync can surface it, rather than being silently swallowed.
+    // Handles the two ways a terminal write fails to land — lease lost (benign; the new holder
+    // records it) or a store error — uniformly. Returns true when the write landed under a held
+    // lease, so the caller emits its outcome-specific telemetry. outcome is "Success" or "Failure".
+    private bool RecordLanded(
+        RecordAttempt record,
+        Activity? activity,
+        LeasedActivityJob leasedJob,
+        string outcome
+    )
+    {
+        if (record is { Error: null, LeaseHeld: true })
+        {
+            return true;
+        }
+
+        if (record.Error is null)
+        {
+            activity?.SetStatus(ActivityStatusCode.Error, "lease lost");
+            _logger?.LogWarning(
+                "{Outcome} for activity job {JobId} ({ActivityName}) was not recorded because the lease was lost.",
+                outcome,
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
+        }
+        else
+        {
+            activity?.SetStatus(
+                ActivityStatusCode.Error,
+                $"{outcome.ToLowerInvariant()} record failed"
+            );
+            _logger?.LogError(
+                record.Error,
+                "Failed to record {Outcome} for activity job {JobId} ({ActivityName}).",
+                outcome.ToLowerInvariant(),
+                leasedJob.JobId,
+                leasedJob.ActivityName
+            );
+        }
+
+        return false;
+    }
+
+    // A false return means lease lost (expected race; the new holder records it). A thrown store
+    // error is returned so RunOnceAsync can surface it instead of swallowing it.
     private static async Task<RecordAttempt> TryRecordAsync(Func<ValueTask<bool>> record)
     {
         try

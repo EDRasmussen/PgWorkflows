@@ -1,0 +1,9 @@
+# Build output and dependencies
+.svelte-kit/
+build/
+dist/
+node_modules/
+
+# Lockfile and generated database types
+pnpm-lock.yaml
+src/lib/server/db/schema.d.ts

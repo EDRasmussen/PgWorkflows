@@ -423,7 +423,9 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
 
         // The park UPDATE runs first so it acquires the run row lock before the recheck below,
         // mirroring the signal park's lock ordering.
-        await using (var parkCommand = new NpgsqlCommand(ActivityWaitParkSql, connection, transaction))
+        await using (
+            var parkCommand = new NpgsqlCommand(ActivityWaitParkSql, connection, transaction)
+        )
         {
             parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
             parkCommand.Parameters.AddWithValue("lease_token", leaseToken);
@@ -440,13 +442,11 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
             }
         }
 
-        // Close the schedule→park lost-wake race. An activity outcome committed while this park
-        // was in flight saw the run still 'running' and skipped its wake (the edge-trigger in
-        // RecordTerminalAndWakeAsync only updates parked runs). Because the park UPDATE above
-        // holds the run row lock, any such completion either committed before this statement's
-        // fresh snapshot (so the recheck sees the job as terminal and wakes the run) or is still
-        // blocked on the row lock and will see the parked run when it resumes. So one recheck
-        // here covers the window; without it the run would sit out the full grace deadline.
+        // Close the schedule→park lost-wake race: a completion committed during the park saw the run
+        // still 'running' and skipped its wake. Because the park UPDATE holds the row lock, any such
+        // completion either committed before this statement's snapshot (so the recheck sees the job
+        // terminal and wakes the run) or is blocked on the lock and will see the parked run when it
+        // resumes. One recheck covers the window; without it the run waits out its full grace deadline.
         const string recheckSql = """
             update pw_workflow_runs
             set visible_at = @now,
@@ -488,9 +488,9 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
         // The park is open-ended (visible_at = infinity): signal delivery wakes the run via the
-        // edge-trigger in RecordSignalAsync, so there is no point polling a wait that may take days.
-        // The park UPDATE runs first so every signal transaction acquires the run row before any
-        // other lock (same order as ConsumeSignalAsync/RecordSignalAsync), ruling out deadlocks.
+        // edge-trigger, so there's no point polling a wait that may take days. The park UPDATE runs
+        // first so every signal transaction takes the run row before any other lock (same order as
+        // ConsumeSignalAsync/RecordSignalAsync), ruling out deadlocks.
         await using (var parkCommand = new NpgsqlCommand(SignalParkSql, connection, transaction))
         {
             parkCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
@@ -535,11 +535,11 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
             await waitCommand.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        // Close the consume→park lost-wake race. A signal committed in that window saw the run
-        // still 'running' and skipped its wake; because RecordSignalAsync locks the run row before
-        // inserting, any such signal transaction either committed before the park UPDATE above
-        // acquired the row lock (visible to this statement's fresh snapshot) or is still blocked on
-        // it and will see the parked run when it resumes. So one re-check here covers the window.
+        // Close the consume→park lost-wake race: a signal committed in that window saw the run still
+        // 'running' and skipped its wake. Because RecordSignalAsync locks the run row before
+        // inserting, any such signal either committed before the park UPDATE took the lock (visible
+        // to this snapshot) or is blocked on it and will see the parked run when it resumes. One
+        // re-check covers the window.
         const string recheckSql = """
             update pw_workflow_runs
             set visible_at = @now,
@@ -607,10 +607,9 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        // Lock the run row and verify the lease in one statement. This serializes consumption
-        // against RecordSignalAsync (which locks the same row before inserting) and fences out a
-        // worker whose lease was taken over — without it, two executors at the same wait could each
-        // claim a different signal, losing one and diverging from replay.
+        // Lock the run row and verify the lease in one statement, serializing consumption against
+        // RecordSignalAsync and fencing out a worker whose lease was taken over — otherwise two
+        // executors at the same wait could each claim a different signal, diverging from replay.
         const string leaseSql = """
             select 1
             from pw_workflow_runs
@@ -745,7 +744,9 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
             if (status is null or DBNull)
             {
                 await transaction.RollbackAsync(cancellationToken);
-                throw new InvalidOperationException($"Workflow run '{workflowRunId}' was not found.");
+                throw new InvalidOperationException(
+                    $"Workflow run '{workflowRunId}' was not found."
+                );
             }
 
             runStatus = (string)status;
@@ -803,9 +804,8 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
 
         if (inserted is null or DBNull)
         {
-            // Duplicate idempotent delivery: nothing new was buffered, so skip the wake — waking a
-            // parked run here would only force a full replay that finds nothing to consume. Return
-            // the previously recorded signal's id.
+            // Duplicate idempotent delivery: nothing new buffered, so skip the wake — it would only
+            // force a replay that finds nothing to consume. Return the existing signal's id.
             const string existingSql = """
                 select signal_id
                 from pw_workflow_signals
@@ -814,7 +814,11 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
                   and idempotency_key = @idempotency_key;
                 """;
 
-            await using var existingCommand = new NpgsqlCommand(existingSql, connection, transaction);
+            await using var existingCommand = new NpgsqlCommand(
+                existingSql,
+                connection,
+                transaction
+            );
             existingCommand.Parameters.AddWithValue("workflow_run_id", workflowRunId);
             existingCommand.Parameters.AddWithValue("signal_name", signalName);
             existingCommand.Parameters.AddWithValue("idempotency_key", idempotencyKey!);
@@ -1372,19 +1376,19 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
     /// </summary>
     private static string BuildParkSql(string visibleAtExpression) =>
         $"""
-        update pw_workflow_runs
-        set status = @pending_status,
-            visible_at = {visibleAtExpression},
-            attempt = greatest(attempt - 1, 0),
-            updated_at = @updated_at,
-            completed_at = null,
-            result = null,
-            error = null,
-            {LeaseReleaseColumns}
-        where workflow_run_id = @workflow_run_id
-          and lease_token = @lease_token
-          and status = @running_status;
-        """;
+            update pw_workflow_runs
+            set status = @pending_status,
+                visible_at = {visibleAtExpression},
+                attempt = greatest(attempt - 1, 0),
+                updated_at = @updated_at,
+                completed_at = null,
+                result = null,
+                error = null,
+                {LeaseReleaseColumns}
+            where workflow_run_id = @workflow_run_id
+              and lease_token = @lease_token
+              and status = @running_status;
+            """;
 
     private static readonly string SleepParkSql = BuildParkSql("@fire_at");
 
@@ -1392,11 +1396,8 @@ internal sealed class PostgresWorkflowStore(NpgsqlDataSource dataSource) : IWork
 
     private static readonly string ReleaseRunSql = BuildParkSql("@visible_at");
 
-    // Park with the grace deadline (the safety net against a missed wake); the run is normally
-    // woken much sooner, either by the edge-trigger in the activity store when its last job
-    // completes, or by the recheck in RecordRunWaitingAsync when the jobs finished during the
-    // schedule→park window. The recheck runs on a fresh snapshot after this UPDATE holds the run
-    // row lock, so it cannot lose a concurrent completion the way an in-statement check would.
+    // Park with the grace deadline (safety net against a missed wake); the run is normally woken
+    // much sooner by the activity store's edge-trigger or the recheck in RecordRunWaitingAsync.
     private static readonly string ActivityWaitParkSql = BuildParkSql("@grace_deadline");
 
     private const string PendingStatus = "pending";

@@ -45,8 +45,8 @@ internal sealed class WorkflowContext(
     {
         var timerSequence = _nextTimerSequence++;
 
-        // Read-only: the deadline is persisted atomically with the park (RecordRunSleepingAsync),
-        // so a first encounter computes the deadline and throws, and the runner durably writes it.
+        // Read-only: the deadline is computed here but persisted atomically with the park
+        // (RecordRunSleepingAsync), then replayed on resume.
         var fireAt = await _workflowStore.GetTimerAsync(
             WorkflowRunId,
             timerSequence,
@@ -61,8 +61,7 @@ internal sealed class WorkflowContext(
 
         if (DateTimeOffset.UtcNow >= fireAt.Value)
         {
-            // Already elapsed (including zero/negative durations): continue without parking or
-            // persisting, so no orphan timer row is created.
+            // Already elapsed (incl. zero/negative): continue without parking, so no orphan timer row.
             return;
         }
 
@@ -97,18 +96,15 @@ internal sealed class WorkflowContext(
 
     public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall
-    ) =>
-        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
+    ) => new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
 
     public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, Task<TOutput>>> activityCall
-    ) =>
-        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
+    ) => new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
 
     public WorkflowActivity<TOutput> CallActivity<TActivities, TOutput>(
         Expression<Func<TActivities, ValueTask<TOutput>>> activityCall
-    ) =>
-        new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
+    ) => new(WorkflowActivityCall.FromExpression(activityCall, _jsonSerializerOptions));
 
     public ValueTask<TOutput> Activity<TActivities, TOutput>(
         Expression<Func<TActivities, TOutput>> activityCall,
@@ -215,15 +211,11 @@ internal sealed class WorkflowContext(
         var outcomes = new StepOutcome[handles.Length];
         for (var index = 0; index < handles.Length; index++)
         {
-            resolutions[index] = await ResolveStepAsync<TOutput>(
-                handles[index],
-                cancellationToken
-            );
+            resolutions[index] = await ResolveStepAsync<TOutput>(handles[index], cancellationToken);
             outcomes[index] = resolutions[index].ToOutcome(handles[index].Sequence);
         }
 
-        // Parks if any sibling is outstanding, else records all and throws the lowest-sequence
-        // failure; only returns here when every sibling succeeded.
+        // Parks if any sibling is outstanding; else records all and throws the lowest-sequence failure.
         await CommitFanOutAsync(outcomes, cancellationToken);
 
         var results = new TOutput[handles.Length];
@@ -296,8 +288,8 @@ internal sealed class WorkflowContext(
         var resolution = await ResolveStepAsync<TOutput>(handle, cancellationToken);
         if (!resolution.Ready)
         {
-            // Outstanding: release the lease and park until the step completes (the runner records
-            // the wait). The whole workflow replays on resume; this step's result is then memoized.
+            // Outstanding: park until the step completes; the workflow replays on resume and this
+            // step's result is then memoized.
             Park();
         }
 
@@ -313,10 +305,8 @@ internal sealed class WorkflowContext(
     }
 
     /// <summary>
-    /// Ensures a step's activity job is enqueued and the step row recorded (idempotent on replay —
-    /// an existing step row short-circuits). Never parks or throws on activity failure; that is the
-    /// resolve phase's job. The job carries this run's id so the activity store can wake the run when
-    /// the step (and its fan-out siblings) finish.
+    /// Ensures a step's activity job is enqueued and step row recorded (idempotent on replay).
+    /// Never parks or throws on failure — that is the resolve phase's job.
     /// </summary>
     private async ValueTask<StepHandle> EnsureStepScheduledAsync(
         int stepSequence,
@@ -356,10 +346,9 @@ internal sealed class WorkflowContext(
     }
 
     /// <summary>
-    /// Reads the current outcome of a step from its memoized step row, else its activity job — purely
-    /// observational, writing nothing. Returning the outcome (rather than acting on it) lets a
-    /// fan-out decide to wait for all siblings before committing successes or surfacing a failure,
-    /// matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/> semantics.
+    /// Reads a step's current outcome from its memoized step row, else its activity job — purely
+    /// observational. Returns the outcome rather than acting on it so a fan-out can wait for all
+    /// siblings before committing, matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/>.
     /// </summary>
     private async ValueTask<StepResolution<TOutput>> ResolveStepAsync<TOutput>(
         StepHandle handle,
@@ -397,11 +386,9 @@ internal sealed class WorkflowContext(
     }
 
     /// <summary>
-    /// Schedules a whole fan-out: reads any existing step rows, then enqueues every not-yet-scheduled
-    /// activity job back-to-back (before recording any step row) so the siblings land in the queue
-    /// together and an activity worker can co-schedule them — rather than interleaving an enqueue and
-    /// a step-row write per sibling, which would widen the window for a worker to lease only a subset.
-    /// Idempotent on replay: an existing step row reuses its job.
+    /// Schedules a whole fan-out: reads existing step rows, then enqueues every not-yet-scheduled job
+    /// before recording any step row, so siblings land together and a worker can co-schedule them
+    /// instead of leasing only a subset. Idempotent on replay: an existing step row reuses its job.
     /// </summary>
     private async ValueTask<StepHandle[]> ScheduleFanOutAsync(
         int firstStepSequence,
@@ -430,9 +417,8 @@ internal sealed class WorkflowContext(
                 continue;
             }
 
-            // Issue the enqueues concurrently (not one-after-another) so the fan-out siblings land in
-            // the queue together and an activity worker's batch poll can co-schedule them, rather than
-            // leasing only the first while the rest are still being inserted.
+            // Enqueue siblings concurrently so they land together and a worker's batch poll can
+            // co-schedule them, rather than leasing only the first while the rest are still inserting.
             enqueueTasks[index] = _activityStore
                 .EnqueueAsync(
                     activityCalls[index].ActivityName,
@@ -479,10 +465,9 @@ internal sealed class WorkflowContext(
     }
 
     /// <summary>
-    /// Commits a resolved fan-out: parks if any sibling is still outstanding (so the run waits for the
-    /// whole batch, matching <see cref="Task.WhenAll(System.Threading.Tasks.Task[])"/>), otherwise
-    /// records every outcome and throws the lowest-sequence failure if any. Outcomes are supplied in
-    /// step-sequence order, so the first failure encountered is the lowest sequence.
+    /// Commits a resolved fan-out: parks if any sibling is still outstanding, otherwise records every
+    /// outcome and throws the lowest-sequence failure if any. Outcomes arrive in step-sequence order,
+    /// so the first failure encountered is the lowest sequence.
     /// </summary>
     private async ValueTask CommitFanOutAsync(
         StepOutcome[] outcomes,
@@ -519,7 +504,10 @@ internal sealed class WorkflowContext(
     /// Durably records a resolved (non-pending) step's outcome so it is memoized across replays.
     /// Idempotent: re-recording an already-terminal step is harmless.
     /// </summary>
-    private ValueTask FinalizeOutcomeAsync(StepOutcome outcome, CancellationToken cancellationToken) =>
+    private ValueTask FinalizeOutcomeAsync(
+        StepOutcome outcome,
+        CancellationToken cancellationToken
+    ) =>
         outcome.Error is { } error
             ? _workflowStore.RecordStepFailureAsync(
                 WorkflowRunId,
@@ -536,8 +524,8 @@ internal sealed class WorkflowContext(
 
     private void Park()
     {
-        // Mirror ctx.Sleep: flag the requested suspend so the runner fails loudly if user code
-        // swallows the control-flow exception, then unwind so the runner can release the lease.
+        // Mirror ctx.Sleep: flag the suspend so the runner fails loudly if user code swallows the
+        // exception, then unwind to release the lease.
         ParkRequested = true;
         throw new WorkflowParkException();
     }

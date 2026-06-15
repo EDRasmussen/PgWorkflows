@@ -156,9 +156,9 @@ internal static class ContinuousDispatcher
                             }
                             finally
                             {
-                                // Release before leaving the in-flight map: the drain awaits whatever
-                                // is still in the map, so the permit must be returned first or the
-                                // drain could dispose the semaphore with this Release still pending.
+                                // Release before leaving the in-flight map: the drain awaits the map,
+                                // so the permit must return first or the drain could dispose the
+                                // semaphore with this Release still pending.
                                 slots.Release();
                                 outcomes.Writer.TryWrite(ok);
                                 inFlight.TryRemove(key, out _);

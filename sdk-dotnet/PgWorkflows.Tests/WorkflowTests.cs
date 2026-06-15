@@ -53,7 +53,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             Assert.Equal(WorkflowStatus.Succeeded, run.Status);
             Assert.Equal(WorkflowStepStatus.Succeeded, firstStep!.Status);
             Assert.Equal(WorkflowStepStatus.Succeeded, secondStep!.Status);
-            Assert.Equal("HELLO WORLD", System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!));
+            Assert.Equal(
+                "HELLO WORLD",
+                System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!)
+            );
         }
         finally
         {
@@ -88,8 +91,8 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         var registry = new WorkflowRegistry();
         registry.Register<DuplicateNameWorkflowA>();
 
-        var ex = Assert.Throws<InvalidOperationException>(
-            () => registry.Register<DuplicateNameWorkflowB>()
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            registry.Register<DuplicateNameWorkflowB>()
         );
 
         Assert.Contains("duplicate-workflow-name", ex.Message);
@@ -239,7 +242,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         {
             var client = provider.GetRequiredService<IPgWorkflowClient>();
             var handle = await client.StartAsync<ClientGreetingWorkflow, string, string>("world");
-            var run = await WaitForWorkflowTerminalAsync(handle.WorkflowRunId, TimeSpan.FromSeconds(10));
+            var run = await WaitForWorkflowTerminalAsync(
+                handle.WorkflowRunId,
+                TimeSpan.FromSeconds(10)
+            );
             var result = await handle.GetResultAsync();
 
             Assert.Equal(WorkflowStatus.Succeeded, run.Status);
@@ -442,12 +448,17 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             WorkflowStore,
             runner,
             provider,
-            WorkflowWorkerOptions() with { GetRetryDelay = _ => TimeSpan.Zero }
+            WorkflowWorkerOptions() with
+            {
+                GetRetryDelay = _ => TimeSpan.Zero,
+            }
         );
         TransientInfrastructureFailureWorkflow.Reset();
-        var handle = await client.StartAsync<TransientInfrastructureFailureWorkflow, string, string>(
-            "world"
-        );
+        var handle = await client.StartAsync<
+            TransientInfrastructureFailureWorkflow,
+            string,
+            string
+        >("world");
 
         // The transient error is rethrown so the worker loop backs off, but the run itself is
         // released back to pending rather than failed.
@@ -795,7 +806,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
             var hooks = await WorkflowStore.ListFailureHooksAsync(handle.WorkflowRunId);
             Assert.Equal(2, hooks.Count);
-            Assert.All(hooks, hook => Assert.Equal(WorkflowFailureHookStatus.Succeeded, hook.Status));
+            Assert.All(
+                hooks,
+                hook => Assert.Equal(WorkflowFailureHookStatus.Succeeded, hook.Status)
+            );
         }
         finally
         {
@@ -823,7 +837,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             WorkflowStore,
             runner,
             provider,
-            WorkflowWorkerOptions() with { LeaseDuration = TimeSpan.FromMilliseconds(50) }
+            WorkflowWorkerOptions() with
+            {
+                LeaseDuration = TimeSpan.FromMilliseconds(50),
+            }
         );
         var handle = await client.StartAsync<ImmediateWorkflow, string, string>("world");
         await MarkWorkflowRunRunningUnleasedAsync(handle.WorkflowRunId);
@@ -834,7 +851,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         Assert.Equal(1, processed);
         var run = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
         Assert.Equal(WorkflowStatus.Succeeded, run!.Status);
-        Assert.Equal("done world", System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!));
+        Assert.Equal(
+            "done world",
+            System.Text.Json.JsonSerializer.Deserialize<string>(run.ResultJson!)
+        );
     }
 
     [Fact]
@@ -1180,7 +1200,11 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         );
         var handle = await client.StartAsync<BufferedSignalWorkflow, string, string>("value");
 
-        await handle.SignalAsync("approval", new SignalDecision("first"), idempotencyKey: "approval-1");
+        await handle.SignalAsync(
+            "approval",
+            new SignalDecision("first"),
+            idempotencyKey: "approval-1"
+        );
         Assert.Equal(1, await worker.RunOnceAsync());
 
         var parked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
@@ -1188,14 +1212,22 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         Assert.True(parked.VisibleAt > DateTimeOffset.UtcNow);
 
         // Redelivering the already-consumed signal buffers nothing and must not wake the run.
-        await handle.SignalAsync("approval", new SignalDecision("duplicate"), idempotencyKey: "approval-1");
+        await handle.SignalAsync(
+            "approval",
+            new SignalDecision("duplicate"),
+            idempotencyKey: "approval-1"
+        );
 
         var stillParked = await WorkflowStore.GetRunAsync(handle.WorkflowRunId);
         Assert.Equal(parked.VisibleAt, stillParked!.VisibleAt);
         Assert.Equal(0, await worker.RunOnceAsync());
         Assert.Equal(1, await CountSignalsAsync(handle.WorkflowRunId));
 
-        await handle.SignalAsync("approval", new SignalDecision("second"), idempotencyKey: "approval-2");
+        await handle.SignalAsync(
+            "approval",
+            new SignalDecision("second"),
+            idempotencyKey: "approval-2"
+        );
         Assert.Equal(1, await worker.RunOnceAsync());
         Assert.Equal("first,second", await handle.GetResultAsync());
     }
@@ -1222,7 +1254,9 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
 
     private async Task<WorkflowRun> SingleWorkflowRunAsync()
     {
-        await using var command = DataSource.CreateCommand("select workflow_run_id from pw_workflow_runs;");
+        await using var command = DataSource.CreateCommand(
+            "select workflow_run_id from pw_workflow_runs;"
+        );
         var runId = (Guid)(await command.ExecuteScalarAsync())!;
         return (await WorkflowStore.GetRunAsync(runId))!;
     }
@@ -1265,7 +1299,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             """
         );
         command.Parameters.AddWithValue("workflow_run_id", workflowRunId);
-        command.Parameters.AddWithValue("updated_at", DateTimeOffset.UtcNow.Subtract(TimeSpan.FromMinutes(1)));
+        command.Parameters.AddWithValue(
+            "updated_at",
+            DateTimeOffset.UtcNow.Subtract(TimeSpan.FromMinutes(1))
+        );
         await command.ExecuteNonQueryAsync();
     }
 
@@ -1322,7 +1359,10 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         }
     }
 
-    private async Task<WorkflowRun> WaitForWorkflowTerminalAsync(Guid workflowRunId, TimeSpan timeout)
+    private async Task<WorkflowRun> WaitForWorkflowTerminalAsync(
+        Guid workflowRunId,
+        TimeSpan timeout
+    )
     {
         using var cts = new CancellationTokenSource(timeout);
         while (true)
@@ -1524,7 +1564,11 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             IWorkflowContext ctx,
             string input,
             CancellationToken cancellationToken
-        ) => ctx.Activity((GatedActivities a) => a.RunAsync(input, cancellationToken), cancellationToken);
+        ) =>
+            ctx.Activity(
+                (GatedActivities a) => a.RunAsync(input, cancellationToken),
+                cancellationToken
+            );
     }
 
     private sealed class GatedFanOutActivities
@@ -1575,8 +1619,12 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         )
         {
             var (left, right) = await ctx.WhenAll(
-                ctx.CallActivity((GatedFanOutActivities a) => a.LeftAsync(input, cancellationToken)),
-                ctx.CallActivity((GatedFanOutActivities a) => a.RightAsync(input, cancellationToken)),
+                ctx.CallActivity(
+                    (GatedFanOutActivities a) => a.LeftAsync(input, cancellationToken)
+                ),
+                ctx.CallActivity(
+                    (GatedFanOutActivities a) => a.RightAsync(input, cancellationToken)
+                ),
                 cancellationToken
             );
 
@@ -1602,10 +1650,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             // Long sleep: the test fires the timer deterministically rather than waiting it out.
             await ctx.Sleep(TimeSpan.FromSeconds(30), cancellationToken);
 
-            return await ctx.Activity(
-                (SleepActivities a) => a.Second(first),
-                cancellationToken
-            );
+            return await ctx.Activity((SleepActivities a) => a.Second(first), cancellationToken);
         }
     }
 
@@ -1768,10 +1813,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             CancellationToken cancellationToken
         )
         {
-            var value = await ctx.Activity(
-                (RetryActivities a) => a.Echo(input),
-                cancellationToken
-            );
+            var value = await ctx.Activity((RetryActivities a) => a.Echo(input), cancellationToken);
 
             if (Interlocked.Increment(ref s_invocations) == 1)
             {
@@ -1792,14 +1834,8 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             CancellationToken cancellationToken
         )
         {
-            await ctx.OnFailure(
-                (FailureHookActivities a) => a.First(input),
-                cancellationToken
-            );
-            await ctx.OnFailure(
-                (FailureHookActivities a) => a.Second(input),
-                cancellationToken
-            );
+            await ctx.OnFailure((FailureHookActivities a) => a.First(input), cancellationToken);
+            await ctx.OnFailure((FailureHookActivities a) => a.Second(input), cancellationToken);
             throw new InvalidOperationException($"boom {input}");
         }
     }
@@ -1826,8 +1862,7 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
             IWorkflowContext ctx,
             string name,
             CancellationToken cancellationToken
-        ) =>
-            ctx.Activity((CustomNamedActivities a) => a.Greet(name), cancellationToken);
+        ) => ctx.Activity((CustomNamedActivities a) => a.Greet(name), cancellationToken);
     }
 
     public sealed class CustomNamedActivities
@@ -1882,5 +1917,4 @@ public sealed class WorkflowTests(PostgresFixture fixture) : PostgresTestBase(fi
         [WorkflowRun]
         public string Run(IWorkflowContext _, string name) => $"done {name}";
     }
-
 }

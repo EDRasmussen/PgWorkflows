@@ -110,7 +110,10 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
         ArgumentException.ThrowIfNullOrWhiteSpace(activityName);
         if (idempotencyKey is not null && string.IsNullOrWhiteSpace(idempotencyKey))
         {
-            throw new ArgumentException("Idempotency key cannot be empty or whitespace.", nameof(idempotencyKey));
+            throw new ArgumentException(
+                "Idempotency key cannot be empty or whitespace.",
+                nameof(idempotencyKey)
+            );
         }
 
         var jobId = Guid.NewGuid();
@@ -429,16 +432,12 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
     }
 
     /// <summary>
-    /// Records a terminal job outcome (success/failure) under the lease guard and, in the same
-    /// transaction, wakes the parent workflow run by pulling its parked <c>visible_at</c> forward to
-    /// now, so a parked workflow resumes on the next worker poll instead of waiting out its
-    /// safety-net grace. The two writes are atomic so a crash can never leave a completed job whose
-    /// parent was never signalled. Every completion wakes (not just the last sibling): for a fan-out
-    /// this can resume-and-re-park a few times until the last sibling lands, which is harmless —
-    /// replay is idempotent and the resume is cheap. Deliberately not gated on "no incomplete
-    /// siblings remain": that check races under concurrent completions (each sees the other as still
-    /// in-flight) and would lose the wake-up. Returns <c>false</c> (writing nothing) when the lease
-    /// was lost.
+    /// Records a terminal job outcome under the lease guard and, in the same transaction, wakes the
+    /// parent run by pulling its parked <c>visible_at</c> forward — atomic, so a crash can't leave a
+    /// completed job whose parent was never woken. Every completion wakes (not just the last
+    /// sibling): a fan-out may resume-and-re-park a few times, harmless since replay is idempotent.
+    /// Not gated on "no siblings remain" — that check races under concurrent completions and loses
+    /// the wake. Returns <c>false</c> when the lease was lost.
     /// </summary>
     private async ValueTask<bool> RecordTerminalAndWakeAsync(
         string setClause,
@@ -453,11 +452,9 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
         await using var connection = await _dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
 
-        // Lock the parent run row before touching the job. The park (RecordRunWaitingAsync) also
-        // locks the run row first, so completion and park serialize run-then-job in one direction.
-        // Without it the wake below can no-op against a still-'running' run while the park's recheck
-        // reads a snapshot that misses this job's uncommitted completion — a lost wake that strands
-        // the run until its full grace deadline. (workflow_run_id is immutable once set.)
+        // Lock the parent run row first (the park does too) so completion and park serialize
+        // run-then-job; otherwise the wake below races the park's recheck and is lost, stranding the
+        // run until its grace deadline. (workflow_run_id is immutable once set.)
         Guid? workflowRunId;
         await using (
             var command = new NpgsqlCommand(
@@ -468,8 +465,9 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
         )
         {
             command.Parameters.AddWithValue("job_id", jobId);
-            workflowRunId =
-                await command.ExecuteScalarAsync(cancellationToken) is Guid id ? id : null;
+            workflowRunId = await command.ExecuteScalarAsync(cancellationToken) is Guid id
+                ? id
+                : null;
         }
 
         if (workflowRunId is { } lockRunId)
@@ -507,9 +505,8 @@ internal sealed class PostgresActivityJobStore : IActivityJobStore
         }
 
         // Wake the parent run by pulling its parked deadline forward. The visible_at > @now guard
-        // only ever pulls the wake earlier, never pushes a deadline out, and makes this idempotent
-        // across concurrent sibling completions. A run not currently parked (running, or already
-        // runnable) makes this a no-op.
+        // only pulls earlier, never later, so it's idempotent across concurrent sibling completions
+        // and a no-op for a run that isn't parked.
         if (workflowRunId is { } wakeRunId)
         {
             const string wakeSql = """

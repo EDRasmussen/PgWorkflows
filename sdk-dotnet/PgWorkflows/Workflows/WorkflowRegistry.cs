@@ -75,7 +75,8 @@ internal sealed class WorkflowRegistry
 
     private static WorkflowDefinition CreateDefinition(Type workflowType)
     {
-        var workflowAttribute = workflowType.GetCustomAttribute<WorkflowAttribute>()
+        var workflowAttribute =
+            workflowType.GetCustomAttribute<WorkflowAttribute>()
             ?? throw new InvalidOperationException(
                 $"Workflow type '{workflowType.FullName}' must be marked with [Workflow]."
             );
@@ -113,9 +114,7 @@ internal sealed class WorkflowRegistry
     {
         ReflectionInvoke.ValidateInvokableMethod(method, "Workflow run method");
 
-        if (
-            method.GetParameters().Count(p => p.ParameterType == typeof(IWorkflowContext)) != 1
-        )
+        if (method.GetParameters().Count(p => p.ParameterType == typeof(IWorkflowContext)) != 1)
         {
             throw new InvalidOperationException(
                 $"Workflow run method '{method.DeclaringType?.FullName}.{method.Name}' must accept exactly one IWorkflowContext parameter."
@@ -148,12 +147,19 @@ internal sealed class WorkflowRegistry
 
     private static Type GetOutputType(Type returnType)
     {
-        if (returnType == typeof(void) || returnType == typeof(Task) || returnType == typeof(ValueTask))
+        if (
+            returnType == typeof(void)
+            || returnType == typeof(Task)
+            || returnType == typeof(ValueTask)
+        )
         {
             return typeof(object);
         }
 
-        if (returnType.IsGenericType && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>))
+        if (
+            returnType.IsGenericType
+            && returnType.GetGenericTypeDefinition() == typeof(ValueTask<>)
+        )
         {
             return returnType.GetGenericArguments()[0];
         }
@@ -166,10 +172,13 @@ internal sealed class WorkflowRegistry
         return returnType;
     }
 
-    private static Func<IServiceProvider, IWorkflowContext, object?, CancellationToken, ValueTask<object?>> CreateInvoker(
-        Type workflowType,
-        MethodInfo method
-    )
+    private static Func<
+        IServiceProvider,
+        IWorkflowContext,
+        object?,
+        CancellationToken,
+        ValueTask<object?>
+    > CreateInvoker(Type workflowType, MethodInfo method)
     {
         var parameters = method.GetParameters();
 

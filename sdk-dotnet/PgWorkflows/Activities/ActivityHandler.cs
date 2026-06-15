@@ -4,4 +4,5 @@ namespace PgWorkflows.Activities;
 internal delegate ValueTask<string?> ActivityHandler(
     ActivityExecutionContext context,
     string? inputJson,
-    CancellationToken cancellationToken);
+    CancellationToken cancellationToken
+);

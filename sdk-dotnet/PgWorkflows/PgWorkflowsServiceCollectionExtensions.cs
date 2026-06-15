@@ -2,8 +2,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using PgWorkflows.Activities;
 using PgWorkflows.Persistence;
-using PgWorkflows.Workflows;
 using PgWorkflows.Workers;
+using PgWorkflows.Workflows;
 
 namespace PgWorkflows;
 

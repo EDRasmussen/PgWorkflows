@@ -1,0 +1,37 @@
+name: Dashboard
+
+on:
+  push:
+    branches: [main]
+    paths: ["dashboard/**", ".github/workflows/dashboard.yml"]
+  pull_request:
+    paths: ["dashboard/**", ".github/workflows/dashboard.yml"]
+
+defaults:
+  run:
+    working-directory: dashboard
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: dashboard/pnpm-lock.yaml
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint (prettier + eslint)
+        run: pnpm run lint
+
+      - name: Type-check (svelte-check)
+        run: pnpm run check

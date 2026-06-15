@@ -37,19 +37,9 @@ a series of short passes, each ending in a park, rather than one span that lasts
 
 ## The dashboard
 
-The dashboard is a read-only web UI over the PgWorkflows tables: a live run feed with
-status filters, and a per-run view of steps, timers, signal waits, and failure hooks.
-Point it at the same database your workers use:
-
-```sh
-docker run -p 3000:3000 \
-  -e DATABASE_URL=postgres://user:pass@host:5432/yourdb \
-  ghcr.io/edrasmussen/pgworkflows-dashboard
-```
-
-It only reads, so a read-only database role works. The repo's
-`docker compose up --build -d` starts it alongside the example stack at
-<http://localhost:3000>.
+A read-only web UI over the PgWorkflows tables — a live run feed plus a per-run view of
+steps, timers, signal waits, and failure hooks — shipped as a Docker image. See
+[Dashboard](/dashboard/) to run it.
 
 ## Plain SQL
 

@@ -3,8 +3,10 @@ namespace PgWorkflows.Workflows;
 internal sealed class PgWorkflowClient(WorkflowRegistry registry, WorkflowRunner runner)
     : IPgWorkflowClient
 {
-    private readonly WorkflowRegistry _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-    private readonly WorkflowRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+    private readonly WorkflowRegistry _registry =
+        registry ?? throw new ArgumentNullException(nameof(registry));
+    private readonly WorkflowRunner _runner =
+        runner ?? throw new ArgumentNullException(nameof(runner));
 
     public async ValueTask<TOutput> ExecuteAsync<TWorkflow, TInput, TOutput>(
         TInput input,
@@ -53,8 +55,7 @@ internal sealed class PgWorkflowClient(WorkflowRegistry registry, WorkflowRunner
         TSignal signal,
         string? idempotencyKey = null,
         CancellationToken cancellationToken = default
-    ) =>
-        _runner.SignalAsync(workflowRunId, name, signal, idempotencyKey, cancellationToken);
+    ) => _runner.SignalAsync(workflowRunId, name, signal, idempotencyKey, cancellationToken);
 
     private static void EnsureType<TActual>(Type expected, string role, Type workflowType)
     {

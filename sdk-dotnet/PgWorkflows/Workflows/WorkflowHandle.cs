@@ -41,6 +41,5 @@ public sealed class WorkflowHandle<TOutput>
         TSignal signal,
         string? idempotencyKey = null,
         CancellationToken cancellationToken = default
-    ) =>
-        _runner.SignalAsync(WorkflowRunId, name, signal, idempotencyKey, cancellationToken);
+    ) => _runner.SignalAsync(WorkflowRunId, name, signal, idempotencyKey, cancellationToken);
 }

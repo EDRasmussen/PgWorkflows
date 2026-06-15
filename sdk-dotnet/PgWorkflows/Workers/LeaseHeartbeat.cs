@@ -79,8 +79,12 @@ internal sealed class LeaseHeartbeat : IAsyncDisposable
         _logger = logger;
     }
 
-    public void Register(Guid key, string leaseToken, DateTimeOffset leaseExpiresAt, Action onLeaseLost) =>
-        _entries[key] = new Entry(leaseToken, onLeaseLost) { Expiry = leaseExpiresAt };
+    public void Register(
+        Guid key,
+        string leaseToken,
+        DateTimeOffset leaseExpiresAt,
+        Action onLeaseLost
+    ) => _entries[key] = new Entry(leaseToken, onLeaseLost) { Expiry = leaseExpiresAt };
 
     public void Unregister(Guid key) => _entries.TryRemove(key, out _);
 
@@ -122,9 +126,8 @@ internal sealed class LeaseHeartbeat : IAsyncDisposable
             }
             catch (Exception ex)
             {
-                // Transient store error this tick. A failed query proves nothing about who still
-                // holds a lease, so don't abandon on it — only drop items whose lease has actually
-                // lapsed while we were failing, mirroring the old per-item renewer.
+                // Transient store error this tick. A failed query proves nothing about who holds a
+                // lease, so only drop items whose lease has actually lapsed.
                 _logger?.LogWarning(ex, "Lease heartbeat renewal failed; retrying next tick.");
                 foreach (var (key, entry) in snapshot)
                 {
@@ -162,7 +165,7 @@ internal sealed class LeaseHeartbeat : IAsyncDisposable
         }
 
         // A throwing callback must not take down the loop — that would stop renewing every other
-        // in-flight lease this worker holds, not just this one.
+        // lease this worker holds.
         try
         {
             entry.OnLeaseLost();

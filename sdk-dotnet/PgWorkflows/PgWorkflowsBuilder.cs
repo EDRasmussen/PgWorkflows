@@ -127,7 +127,8 @@ public sealed class PgWorkflowsBuilder
         // A pre-built data source owns its own pool; we can only validate it, not size it.
         _poolExplicit = true;
         if (
-            new NpgsqlConnectionStringBuilder(dataSource.ConnectionString) is { MaxPoolSize: var pool }
+            new NpgsqlConnectionStringBuilder(dataSource.ConnectionString)
+                is { MaxPoolSize: var pool }
             && pool > 0
         )
         {
